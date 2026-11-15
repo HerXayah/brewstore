@@ -71,6 +71,10 @@ static bool g_context_menu;
 static int g_context_selected;
 static PadState* g_pad;
 static bool g_return_to_repos;
+static bool g_batch_active;
+static bool g_batch_stop;
+static int g_batch_index;
+static int g_batch_total;
 static int g_scroll_page;
 static bool g_repo_manager;
 static bool g_settings_screen;
@@ -819,6 +823,12 @@ static void draw_download_progress(Ui* ui, const char* title,
     ui_begin(ui);
     ui_clear(ui, COLOR_BACKGROUND);
     ui_text(ui, 28, 96, "Downloading", 26, COLOR_TEXT);
+    if (g_batch_active) {
+        char batch[32];
+        snprintf(batch, sizeof(batch), "%d / %d", g_batch_index, g_batch_total);
+        const int width = ui_text_width(ui, batch, 15);
+        ui_text(ui, UI_WIDTH - 28 - width, 104, batch, 15, COLOR_ACCENT);
+    }
     ui_text_truncated(ui, 28, 136, title, 17, COLOR_MUTED, UI_WIDTH - 56);
 
     const int bar_x = 28;
@@ -936,6 +946,12 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     ui_clear(ui, COLOR_BACKGROUND);
     ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
     ui_text(ui, 24, 14, "Installing", 24, COLOR_TEXT);
+    if (g_batch_active) {
+        char batch[32];
+        snprintf(batch, sizeof(batch), "%d / %d", g_batch_index, g_batch_total);
+        const int width = ui_text_width(ui, batch, 15);
+        ui_text(ui, UI_WIDTH - 28 - width, 22, batch, 15, COLOR_ACCENT);
+    }
     ui_text_truncated(ui, 28, 96, title, 20, COLOR_TEXT, UI_WIDTH - 56);
     ui_text(ui, 28, 132, step, 16, COLOR_MUTED);
 
@@ -956,10 +972,15 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     ui_end(ui);
 }
 
+static void install_redraw(void) {
+    if (!g_batch_active)
+        draw_shop(g_ui);
+}
+
 static void install_package(const HbPackage* package, PadState* pad) {
     if (!g_network_ready) {
         set_status("Network is unavailable.");
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
 
@@ -969,12 +990,12 @@ static void install_package(const HbPackage* package, PadState* pad) {
     unsigned long long asset_size = 0;
     if (package->release[0] || is_plain_github_repo(package->url)) {
         set_status("Finding latest release for %s ...", package->title);
-        draw_shop(g_ui);
+        install_redraw();
         if (release_latest_asset(package->url, package->asset, CACHE_DIR "/release.json",
                                  url, sizeof(url), asset_name, sizeof(asset_name),
                                  &asset_size, error, sizeof(error)) != 0) {
             set_status("Release failed: %s", error);
-            draw_shop(g_ui);
+            install_redraw();
             return;
         }
     } else if (package->asset[0]) {
@@ -982,14 +1003,14 @@ static void install_package(const HbPackage* package, PadState* pad) {
         snprintf(asset_name, sizeof(asset_name), "%s", package->asset);
     } else if (http_github_archive_url(package->url, package->branch, url, sizeof(url)) != 0) {
         set_status("Could not resolve the package URL.");
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
 
     char cache[512];
     snprintf(cache, sizeof(cache), CACHE_DIR "/%s", asset_name[0] ? "release-asset" : "package.zip");
     set_status("Downloading %s ...", package->title);
-    draw_shop(g_ui);
+    install_redraw();
 
     DownloadJob job;
     memset(&job, 0, sizeof(job));
@@ -1000,13 +1021,14 @@ static void install_package(const HbPackage* package, PadState* pad) {
     const int download_result = run_download(&job, pad);
     if (download_result == -2 || job.cancel) {
         g_ignore_b = true;
+        g_batch_stop = true;
         set_status("Download cancelled.");
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
     if (download_result != 0) {
         set_status("Download failed: %s", job.error[0] ? job.error : "network error");
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
     char hash[65];
@@ -1014,21 +1036,21 @@ static void install_package(const HbPackage* package, PadState* pad) {
     if (package->sha256[0] && strcasecmp(hash, package->sha256) != 0) {
         remove(cache);
         set_status("SHA-256 mismatch.");
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
 
     const bool root_target = strcmp(package->target, "sdmc:/switch") == 0;
     if (root_target && (!asset_name[0] || ends_with_ci(asset_name, ".zip"))) {
         set_status("sdmc:/switch only accepts a single non-zip asset.");
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
 
     draw_install_progress(g_ui, package->title, "Preparing install", 10);
     if (path_mkdirs(package->target) != 0) {
         set_status("Could not prepare the install target.");
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
 
@@ -1040,7 +1062,7 @@ static void install_package(const HbPackage* package, PadState* pad) {
         if (ends_with_ci(asset_name, ".zip")) {
             if (zip_extract(cache, package->target, "", error, sizeof(error)) != 0) {
                 set_status("Extract failed: %s", error);
-                draw_shop(g_ui);
+                install_redraw();
                 return;
             }
         } else {
@@ -1048,13 +1070,13 @@ static void install_package(const HbPackage* package, PadState* pad) {
                      package->target, asset_name);
             if (path_copy_file(cache, installed_file) != 0) {
                 set_status("Could not write the release asset.");
-                draw_shop(g_ui);
+                install_redraw();
                 return;
             }
         }
     } else if (zip_extract(cache, package->target, package->strip_prefix, error, sizeof(error)) != 0) {
         set_status("Extract failed: %s", error);
-        draw_shop(g_ui);
+        install_redraw();
         return;
     }
 
@@ -1077,7 +1099,7 @@ static void install_package(const HbPackage* package, PadState* pad) {
         set_status("Installed %s", package->title);
     else
         set_status("Installed %s %s", package->title, package->version);
-    draw_shop(g_ui);
+    install_redraw();
 }
 
 static void remove_package(const HbPackage* package) {
@@ -1111,10 +1133,25 @@ static void install_selected_or_current(HbPackage* current, PadState* pad) {
         install_package(current, pad);
         return;
     }
-    for (int i = 0; i < g_manifest.count && !g_quit; i++) {
+    int total = 0;
+    for (int i = 0; i < g_manifest.count; i++) {
         if (is_marked(&g_manifest.items[i]))
-            install_package(&g_manifest.items[i], pad);
+            total++;
     }
+    g_batch_active = true;
+    g_batch_stop = false;
+    g_batch_total = total;
+    int batch_number = 0;
+    for (int i = 0; i < g_manifest.count && !g_quit && !g_batch_stop; i++) {
+        if (!is_marked(&g_manifest.items[i]))
+            continue;
+        g_batch_index = ++batch_number;
+        install_package(&g_manifest.items[i], pad);
+    }
+    g_batch_active = false;
+    g_batch_stop = false;
+    g_batch_index = 0;
+    g_batch_total = 0;
     clear_marks();
     clamp_selection();
     draw_shop(g_ui);
