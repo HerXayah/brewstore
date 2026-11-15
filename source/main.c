@@ -61,6 +61,8 @@ static RepoList g_repos;
 static int g_selected;
 enum { FILTER_ALL = 0, FILTER_UPDATES, FILTER_INSTALLED, FILTER_NOT_INSTALLED };
 static int g_filter;
+enum { SORT_DEFAULT = 0, SORT_NAME, SORT_AUTHOR };
+static int g_sort;
 static bool g_context_menu;
 static int g_context_selected;
 static PadState* g_pad;
@@ -219,15 +221,34 @@ static int visible_count(void) {
     return count;
 }
 
+static int compare_packages(const void* left, const void* right) {
+    const HbPackage* a = *(const HbPackage* const*)left;
+    const HbPackage* b = *(const HbPackage* const*)right;
+    if (g_sort == SORT_NAME)
+        return strcasecmp(a->title, b->title);
+    if (g_sort == SORT_AUTHOR)
+        return strcasecmp(a->author, b->author);
+    return 0;
+}
+
 static HbPackage* visible_package(int index) {
-    int current = 0;
+    HbPackage* matches[HBPKG_MAX_PACKAGES];
+    int count = 0;
     for (int i = 0; i < g_manifest.count; i++) {
-        if (!filter_matches(&g_manifest.items[i]))
-            continue;
-        if (current++ == index)
-            return &g_manifest.items[i];
+        if (filter_matches(&g_manifest.items[i]))
+            matches[count++] = &g_manifest.items[i];
     }
-    return NULL;
+    if (g_sort != SORT_DEFAULT)
+        qsort(matches, (size_t)count, sizeof(matches[0]), compare_packages);
+    return index >= 0 && index < count ? matches[index] : NULL;
+}
+
+static const char* sort_name(void) {
+    switch (g_sort) {
+        case SORT_NAME: return "Name";
+        case SORT_AUTHOR: return "Author";
+        default: return "Default";
+    }
 }
 
 static void clamp_selection(void) {
@@ -411,9 +432,10 @@ static void draw_shop_content(Ui* ui) {
     ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
     ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
             "Codename YukinaMinato", 9, COLOR_MUTED);
-    const char* filter = filter_name();
-    const int filter_width = ui_text_width(ui, filter, 13);
-    ui_text(ui, UI_WIDTH - 24 - filter_width, 25, filter, 13, COLOR_ACCENT);
+    char list_label[64];
+    snprintf(list_label, sizeof(list_label), "%s · %s", filter_name(), sort_name());
+    const int filter_width = ui_text_width(ui, list_label, 13);
+    ui_text(ui, UI_WIDTH - 24 - filter_width, 25, list_label, 13, COLOR_ACCENT);
 
     if (!g_manifest.count) {
         ui_text(ui, 24, 104, "Nothing here yet", 26, COLOR_TEXT);
@@ -982,8 +1004,10 @@ static void remove_package(const HbPackage* package) {
 static void draw_context(Ui* ui) {
     if (!ui)
         return;
-    static const char* const options[] = {
-        "Install / Update", "Remove", "Refresh catalogs"
+    char sort_option[64];
+    snprintf(sort_option, sizeof(sort_option), "Sort order: %s", sort_name());
+    const char* options[] = {
+        "Install / Update", "Remove", "Refresh catalogs", sort_option
     };
     ui_begin(ui);
     ui_clear(ui, COLOR_BACKGROUND);
@@ -991,13 +1015,13 @@ static void draw_context(Ui* ui) {
     ui_rect(ui, 0, 0, UI_WIDTH, UI_HEIGHT, RGBA8(0, 0, 0, 170));
 
     const int panel_w = 480;
-    const int panel_h = 240;
+    const int panel_h = 300;
     const int panel_x = (UI_WIDTH - panel_w) / 2;
     const int panel_y = (UI_HEIGHT - panel_h) / 2;
     ui_rect(ui, panel_x, panel_y, panel_w, panel_h, COLOR_PANEL);
     ui_rect(ui, panel_x, panel_y, panel_w, 3, COLOR_ACCENT);
     ui_text(ui, panel_x + 24, panel_y + 22, "Actions", 22, COLOR_TEXT);
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         const int y = panel_y + 72 + i * 48;
         if (i == g_context_selected)
             ui_rect(ui, panel_x + 12, y - 8, panel_w - 24, 40, COLOR_CARD_HOVER);
@@ -1031,6 +1055,14 @@ static void context_action(void) {
         case 2:
             g_context_menu = false;
             refresh_catalogs(true);
+            draw_shop(g_ui);
+            return;
+        case 3:
+            g_sort = (g_sort + 1) % 3;
+            g_selected = 0;
+            g_scroll_page = 0;
+            clamp_selection();
+            g_context_menu = false;
             draw_shop(g_ui);
             return;
         default:
@@ -1580,7 +1612,7 @@ int main(void) {
                     g_context_selected--;
                 changed = true;
             } else if ((down & HidNpadButton_Down) || key_down) {
-                if (g_context_selected < 2)
+                if (g_context_selected < 3)
                     g_context_selected++;
                 changed = true;
             } else if ((down & HidNpadButton_A) || key_accept) {
