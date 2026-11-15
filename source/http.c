@@ -26,6 +26,7 @@
 #define HTTP_MAX_HEADER 16384
 #define HTTP_MAX_REDIRECTS 4
 #define HTTP_CONNECT_TIMEOUT_MS 15000
+#define HTTP_BUFFER_SIZE (128 * 1024)
 
 typedef struct {
     char host[256];
@@ -43,7 +44,7 @@ typedef struct {
 
 typedef struct {
     SslConnection* connection;
-    unsigned char buffer[32768];
+    unsigned char* buffer;
     size_t position;
     size_t length;
     bool eof;
@@ -59,6 +60,7 @@ typedef struct {
 static bool g_network_ready;
 static bool g_ssl_ready;
 static char g_proxy_prefix[256];
+static unsigned char g_reader_buffer[HTTP_BUFFER_SIZE];
 
 static void set_error(char* err, size_t err_size, const char* format, ...) {
     if (!err || !err_size)
@@ -273,7 +275,7 @@ static int tls_open(Tls* tls, const char* host, int port, char* err, size_t err_
 static int reader_fill(Reader* reader) {
     u32 received = 0;
     const Result rc = sslConnectionRead(reader->connection, reader->buffer,
-                                        sizeof(reader->buffer), &received);
+                                        HTTP_BUFFER_SIZE, &received);
     if (R_FAILED(rc))
         return -1;
     if (received == 0) {
@@ -455,7 +457,7 @@ static int copy_body(Reader* reader, Response* response, FILE* file,
                      Sha256Context* sha, HttpProgressCallback progress, void* user,
                      HttpCancelCallback cancel, void* cancel_user,
                      char* err, size_t err_size) {
-    unsigned char buffer[32768];
+    static unsigned char buffer[HTTP_BUFFER_SIZE];
     unsigned long long total = 0;
     if (response->chunked) {
         for (;;) {
@@ -565,7 +567,7 @@ static int download_once(const char* url, const char* dest, char sha256_hex[65],
         return -1;
     }
 
-    Reader reader = { .connection = &tls.connection };
+    Reader reader = { .connection = &tls.connection, .buffer = g_reader_buffer };
     Response response;
     if (read_response_headers(&reader, &response, err, err_size) != 0) {
         tls_close(&tls);
@@ -600,6 +602,7 @@ static int download_once(const char* url, const char* dest, char sha256_hex[65],
         tls_close(&tls);
         return -1;
     }
+    setvbuf(file, NULL, _IOFBF, 128 * 1024);
     Sha256Context sha;
     sha256ContextCreate(&sha);
     if (copy_body(&reader, &response, file, &sha, progress, user, cancel, cancel_user,

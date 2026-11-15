@@ -123,13 +123,6 @@ static int state_path(const HbPackage* package, char* out, size_t out_size) {
     return written > 0 && (size_t)written < out_size ? 0 : -1;
 }
 
-static bool is_installed(const HbPackage* package) {
-    char path[512];
-    if (state_path(package, path, sizeof(path)) == 0 && access(path, F_OK) == 0)
-        return true;
-    return package->marker[0] && access(package->marker, F_OK) == 0;
-}
-
 static void trim_newline(char* text) {
     text[strcspn(text, "\r\n")] = '\0';
 }
@@ -198,6 +191,28 @@ static bool read_state(const HbPackage* package, char* version, size_t version_s
     }
     fclose(file);
     return true;
+}
+
+static bool is_installed(const HbPackage* package) {
+    char path[512];
+    const bool has_state =
+        state_path(package, path, sizeof(path)) == 0 && access(path, F_OK) == 0;
+    if (has_state) {
+        char version[64];
+        char hash[65];
+        char file[512];
+        if (read_state(package, version, sizeof(version), hash, sizeof(hash),
+                       file, sizeof(file), NULL, NULL)) {
+            if (file[0])
+                return access(file, F_OK) == 0;
+            if (package->marker[0])
+                return access(package->marker, F_OK) == 0;
+            if (strcmp(package->target, "sdmc:/switch") != 0 &&
+                strcmp(package->target, "sdmc:/") != 0)
+                return access(package->target, F_OK) == 0;
+        }
+    }
+    return package->marker[0] && access(package->marker, F_OK) == 0;
 }
 
 static void format_installed_time(unsigned long long timestamp, char* out, size_t out_size) {
