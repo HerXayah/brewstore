@@ -452,7 +452,9 @@ static void draw_shop_content(Ui* ui) {
 
         ui_text_truncated(ui, 958, 522, selected->target, 12, COLOR_MUTED, 268);
         const int button_y = 556;
-        const char* primary_label = is_installed(selected) ? "A  Update" : "A  Install";
+        const char* primary_label = is_installed(selected)
+                                       ? (update_available(selected) ? "A  Update" : "A  Reinstall")
+                                       : "A  Install";
         const int primary_width = ui_text_width(ui, primary_label, 15);
         ui_rect(ui, 958, button_y, 268, 42,
                 is_installed(selected) ? COLOR_ACCENT_DIM : COLOR_ACCENT);
