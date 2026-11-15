@@ -75,6 +75,7 @@ static bool g_batch_active;
 static bool g_batch_stop;
 static int g_batch_index;
 static int g_batch_total;
+static int g_batch_completed;
 static int g_scroll_page;
 static bool g_repo_manager;
 static bool g_settings_screen;
@@ -964,6 +965,10 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
         percent = 0;
     if (percent > 100)
         percent = 100;
+    if (g_batch_active && g_batch_total > 0)
+        percent = (g_batch_completed * 100 + percent) / g_batch_total;
+    if (percent > 100)
+        percent = 100;
     const int filled = bar_width * percent / 100;
     ui_rect(ui, bar_x, bar_y, filled, bar_height, COLOR_ACCENT);
     char line[64];
@@ -1128,30 +1133,161 @@ static void remove_package(const HbPackage* package) {
     draw_shop(g_ui);
 }
 
+typedef struct {
+    HbPackage* package;
+    char cache[512];
+    char hash[65];
+    char asset_name[128];
+    char error[128];
+    bool ok;
+} PreparedPackage;
+
+static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int index) {
+    memset(prepared, 0, sizeof(*prepared));
+    prepared->package = package;
+    char url[1024] = "";
+    char error[128] = {0};
+    unsigned long long asset_size = 0;
+    if (package->release[0] || is_plain_github_repo(package->url)) {
+        if (release_latest_asset(package->url, package->asset, CACHE_DIR "/release.json",
+                                 url, sizeof(url), prepared->asset_name,
+                                 sizeof(prepared->asset_name), &asset_size,
+                                 error, sizeof(error)) != 0) {
+            snprintf(prepared->error, sizeof(prepared->error), "%s", error);
+            return false;
+        }
+    } else if (package->asset[0]) {
+        snprintf(url, sizeof(url), "%s", package->url);
+        snprintf(prepared->asset_name, sizeof(prepared->asset_name), "%s", package->asset);
+    } else if (http_github_archive_url(package->url, package->branch, url, sizeof(url)) != 0) {
+        snprintf(prepared->error, sizeof(prepared->error), "cannot resolve URL");
+        return false;
+    }
+
+    snprintf(prepared->cache, sizeof(prepared->cache), CACHE_DIR "/batch-%d", index);
+    DownloadJob job;
+    memset(&job, 0, sizeof(job));
+    snprintf(job.url, sizeof(job.url), "%s", url);
+    snprintf(job.cache, sizeof(job.cache), "%s", prepared->cache);
+    job.expected_total = asset_size;
+    job.title = package->title;
+    const int result = run_download(&job, g_pad);
+    if (result == -2 || job.cancel) {
+        g_batch_stop = true;
+        g_ignore_b = true;
+        snprintf(prepared->error, sizeof(prepared->error), "cancelled");
+        return false;
+    }
+    if (result != 0) {
+        snprintf(prepared->error, sizeof(prepared->error), "%.127s",
+                 job.error[0] ? job.error : "download failed");
+        return false;
+    }
+    snprintf(prepared->hash, sizeof(prepared->hash), "%s", job.hash);
+    prepared->ok = true;
+    return true;
+}
+
+static bool batch_install(const PreparedPackage* prepared) {
+    HbPackage* package = prepared->package;
+    const bool root_target = strcmp(package->target, "sdmc:/switch") == 0;
+    if (root_target && (!prepared->asset_name[0] ||
+                        ends_with_ci(prepared->asset_name, ".zip"))) {
+        set_status("sdmc:/switch needs a single non-zip asset.");
+        return false;
+    }
+    draw_install_progress(g_ui, package->title, "Preparing install", 10);
+    if (path_mkdirs(package->target) != 0) {
+        set_status("Could not prepare %s.", package->title);
+        return false;
+    }
+    draw_install_progress(g_ui, package->title,
+                          prepared->asset_name[0] &&
+                                  !ends_with_ci(prepared->asset_name, ".zip")
+                              ? "Writing application" : "Extracting files", 45);
+    char installed_file[512] = "";
+    char error[256] = {0};
+    if (prepared->asset_name[0]) {
+        if (ends_with_ci(prepared->asset_name, ".zip")) {
+            if (zip_extract(prepared->cache, package->target, "", error, sizeof(error)) != 0) {
+                set_status("Extract failed: %s", error);
+                return false;
+            }
+        } else {
+            snprintf(installed_file, sizeof(installed_file), "%.255s/%.127s",
+                     package->target, prepared->asset_name);
+            if (path_copy_file(prepared->cache, installed_file) != 0) {
+                set_status("Could not write %s.", package->title);
+                return false;
+            }
+        }
+    } else if (zip_extract(prepared->cache, package->target, package->strip_prefix,
+                           error, sizeof(error)) != 0) {
+        set_status("Extract failed: %s", error);
+        return false;
+    }
+    draw_install_progress(g_ui, package->title, "Finishing", 90);
+    char old_version[64];
+    char old_hash[65];
+    char old_file[512];
+    unsigned long long installed_at = 0;
+    unsigned long long updated_at = 0;
+    read_state(package, old_version, sizeof(old_version), old_hash, sizeof(old_hash),
+               old_file, sizeof(old_file), &installed_at, &updated_at);
+    const unsigned long long now = (unsigned long long)time(NULL);
+    if (!installed_at)
+        installed_at = now;
+    write_state(package, prepared->hash, installed_file, installed_at, now);
+    return true;
+}
+
 static void install_selected_or_current(HbPackage* current, PadState* pad) {
+    (void)pad;
     if (!g_marked_count) {
-        install_package(current, pad);
+        install_package(current, g_pad);
         return;
     }
+    PreparedPackage prepared[HBPKG_MAX_PACKAGES];
     int total = 0;
     for (int i = 0; i < g_manifest.count; i++) {
         if (is_marked(&g_manifest.items[i]))
             total++;
     }
+    if (!total)
+        return;
+
     g_batch_active = true;
     g_batch_stop = false;
     g_batch_total = total;
-    int batch_number = 0;
-    for (int i = 0; i < g_manifest.count && !g_quit && !g_batch_stop; i++) {
+    g_batch_completed = 0;
+    int number = 0;
+    for (int i = 0; i < g_manifest.count && !g_batch_stop; i++) {
         if (!is_marked(&g_manifest.items[i]))
             continue;
-        g_batch_index = ++batch_number;
-        install_package(&g_manifest.items[i], pad);
+        g_batch_index = ++number;
+        if (!batch_prepare(&prepared[number - 1], &g_manifest.items[i], number)) {
+            prepared[number - 1].ok = false;
+        }
     }
+
+    number = 0;
+    for (int i = 0; i < total && !g_batch_stop; i++) {
+        g_batch_index = ++number;
+        g_batch_completed = number - 1;
+        if (prepared[i].ok)
+            batch_install(&prepared[i]);
+        g_batch_completed = number;
+    }
+    if (!g_batch_stop && total) {
+        g_batch_completed = total;
+        draw_install_progress(g_ui, "All packages", "Finishing", 100);
+    }
+
     g_batch_active = false;
     g_batch_stop = false;
     g_batch_index = 0;
     g_batch_total = 0;
+    g_batch_completed = 0;
     clear_marks();
     clamp_selection();
     draw_shop(g_ui);
