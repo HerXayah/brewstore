@@ -546,6 +546,21 @@ static void draw_shop_content(Ui* ui) {
             ui_text(ui, 958, 164, update ? "Update available" : "Installed", 14,
                     update ? COLOR_ACCENT : COLOR_GREEN);
         }
+        ui_text(ui, 958, 188, display_version(selected), 15, COLOR_MUTED);
+        if (is_installed(selected)) {
+            char version[64];
+            char hash[65];
+            char file[512];
+            unsigned long long installed_at = 0;
+            if (read_state(selected, version, sizeof(version), hash, sizeof(hash),
+                           file, sizeof(file), &installed_at, NULL) && installed_at) {
+                char date[64];
+                format_installed_time(installed_at, date, sizeof(date));
+                char line[96];
+                snprintf(line, sizeof(line), "Installed %s", date);
+                ui_text_truncated(ui, 958, 212, line, 12, COLOR_MUTED, 268);
+            }
+        }
 
         ui_markdown_wrap(ui, 958, 236, selected->description, 15, COLOR_TEXT,
                          268, 7, 21);
