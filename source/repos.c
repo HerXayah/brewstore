@@ -35,6 +35,17 @@ static int token_skip(const jsmntok_t* tokens, int index, int count) {
     return position;
 }
 
+static int token_string(const char* json, const jsmntok_t* token, char* out, size_t out_size) {
+    if (!token || token->type != JSMN_STRING || token->end < token->start || !out_size)
+        return -1;
+    const size_t length = (size_t)(token->end - token->start);
+    if (length >= out_size)
+        return -1;
+    memcpy(out, json + token->start, length);
+    out[length] = '\0';
+    return 0;
+}
+
 static int valid_url(const char* url) {
     if (strncmp(url, "https://", 8) != 0)
         return 0;
@@ -56,7 +67,9 @@ int repos_save(const char* path, const RepoList* repos, char* err, size_t err_si
         return fail(err, err_size, "cannot create repos.json");
     fprintf(file, "{\n  \"repositories\": [\n");
     for (int i = 0; i < repos->count; i++) {
-        fprintf(file, "    \"%s\"%s\n", repos->urls[i],
+        fprintf(file,
+                "    {\"url\": \"%s\", \"enabled\": %s}%s\n",
+                repos->urls[i], repos->enabled[i] ? "true" : "false",
                 i + 1 < repos->count ? "," : "");
     }
     fprintf(file, "  ]\n}\n");
@@ -129,28 +142,51 @@ int repos_load(const char* path, RepoList* repos, char* err, size_t err_size) {
 
     int item = found + 1;
     for (int index = 0; index < tokens[found].size; index++) {
-        if (item >= count || tokens[item].type != JSMN_STRING) {
+        char url[512] = "";
+        bool enabled = true;
+        if (item >= count) {
             free(tokens);
             free(text);
-            return fail(err, err_size, "repos.json has a non-string entry");
+            return fail(err, err_size, "repos.json has a malformed entry");
         }
-        const size_t size = (size_t)(tokens[item].end - tokens[item].start);
-        if (size >= sizeof(repos->urls[0])) {
+        if (tokens[item].type == JSMN_STRING) {
+            if (token_string(text, &tokens[item], url, sizeof(url)) != 0) {
+                free(tokens);
+                free(text);
+                return fail(err, err_size, "repository URL is too long");
+            }
+        } else if (tokens[item].type == JSMN_OBJECT) {
+            int position = item + 1;
+            for (int pair = 0; pair < tokens[item].size && position + 1 < count; pair++) {
+                const int key = position;
+                const int value = position + 1;
+                char name[32];
+                if (token_string(text, &tokens[key], name, sizeof(name)) == 0) {
+                    if (strcmp(name, "url") == 0)
+                        token_string(text, &tokens[value], url, sizeof(url));
+                    else if (strcmp(name, "enabled") == 0 &&
+                             tokens[value].type == JSMN_PRIMITIVE)
+                        enabled = !(tokens[value].end - tokens[value].start == 5 &&
+                                    memcmp(text + tokens[value].start, "false", 5) == 0);
+                }
+                position = token_skip(tokens, value, count);
+            }
+        } else {
             free(tokens);
             free(text);
-            return fail(err, err_size, "repository URL is too long");
+            return fail(err, err_size, "repos.json has a malformed entry");
         }
-        memcpy(repos->urls[repos->count], text + tokens[item].start, size);
-        repos->urls[repos->count][size] = '\0';
-        if (!valid_url(repos->urls[repos->count])) {
+        if (!valid_url(url)) {
             free(tokens);
             free(text);
             return fail(err, err_size, "repository URL must use https");
         }
+        snprintf(repos->urls[repos->count], sizeof(repos->urls[0]), "%s", url);
+        repos->enabled[repos->count] = enabled;
         repos->count++;
         if (repos->count >= HBPKG_MAX_REPOS)
             break;
-        item++;
+        item = token_skip(tokens, item, count);
     }
 
     free(tokens);
@@ -167,15 +203,19 @@ int repos_add(RepoList* repos, const char* url) {
     }
     if (repos->count >= HBPKG_MAX_REPOS)
         return -1;
-    strcpy(repos->urls[repos->count++], url);
+    strcpy(repos->urls[repos->count], url);
+    repos->enabled[repos->count] = true;
+    repos->count++;
     return 0;
 }
 
 int repos_remove(RepoList* repos, int index) {
     if (index < 0 || index >= repos->count)
         return -1;
-    for (int i = index; i + 1 < repos->count; i++)
+    for (int i = index; i + 1 < repos->count; i++) {
         strcpy(repos->urls[i], repos->urls[i + 1]);
+        repos->enabled[i] = repos->enabled[i + 1];
+    }
     repos->count--;
     return 0;
 }

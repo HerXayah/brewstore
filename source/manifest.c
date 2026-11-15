@@ -211,13 +211,45 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
         return fail(err, err_size, "packages.json must contain an object");
     }
 
-    const int packages = array_get_json(text, tokens, count, 0, "packages");
-    if (packages < 0 || tokens[packages].type != JSMN_ARRAY) {
-        free(tokens);
-        free(text);
-        return fail(err, err_size, "missing packages array");
+    const int includes = array_get_json(text, tokens, count, 0, "include");
+    if (includes >= 0 && tokens[includes].type == JSMN_ARRAY) {
+        int include_pos = includes + 1;
+        for (int i = 0; i < tokens[includes].size; i++) {
+            if (include_pos >= count || tokens[include_pos].type != JSMN_STRING) {
+                free(tokens);
+                free(text);
+                return fail(err, err_size, "include must be a string");
+            }
+            const size_t include_length = (size_t)(tokens[include_pos].end -
+                                                   tokens[include_pos].start);
+            if (include_length == 0 || include_length >= sizeof(manifest->includes[0]) ||
+                manifest->include_count >= HBPKG_MAX_INCLUDES) {
+                free(tokens);
+                free(text);
+                return fail(err, err_size, "too many or too long includes");
+            }
+            memcpy(manifest->includes[manifest->include_count],
+                   text + tokens[include_pos].start, include_length);
+            manifest->includes[manifest->include_count][include_length] = '\0';
+            if (strstr(manifest->includes[manifest->include_count], "..") ||
+                strchr(manifest->includes[manifest->include_count], '\\')) {
+                free(tokens);
+                free(text);
+                return fail(err, err_size, "include path is unsafe");
+            }
+            manifest->include_count++;
+            include_pos++;
+        }
     }
 
+    const int packages = array_get_json(text, tokens, count, 0, "packages");
+    if (packages < 0 && manifest->include_count == 0) {
+        free(tokens);
+        free(text);
+        return fail(err, err_size, "missing packages or include array");
+    }
+
+    if (packages >= 0) {
     int pos = packages + 1;
     for (int index = 0; index < tokens[packages].size; index++) {
         const int object = pos;
@@ -329,6 +361,7 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
             return fail(err, err_size, "target must be under sdmc:/switch/");
         }
         manifest->count++;
+    }
     }
 
     free(tokens);

@@ -32,14 +32,24 @@ int settings_valid_path(const char* path) {
     return 1;
 }
 
+int settings_valid_proxy(const char* proxy) {
+    if (!proxy || !proxy[0])
+        return 1;
+    if (strncmp(proxy, "https://", 8) != 0)
+        return 0;
+    return !strchr(proxy, '"') && !strchr(proxy, '\\') &&
+           !strchr(proxy, ' ') && !strchr(proxy, '\n') && !strchr(proxy, '\r');
+}
+
 int settings_save(const char* path, const AppSettings* settings, char* err, size_t err_size) {
     char temporary[320];
     snprintf(temporary, sizeof(temporary), "%s.tmp", path);
     FILE* file = fopen(temporary, "wb");
     if (!file)
         return fail(err, err_size, "cannot create settings.json");
-    fprintf(file, "{\n  \"defaultInstallPath\": \"%s\"\n}\n",
-            settings->default_install_path);
+    fprintf(file,
+            "{\n  \"defaultInstallPath\": \"%s\",\n  \"downloadProxy\": \"%s\"\n}\n",
+            settings->default_install_path, settings->download_proxy);
     if (fclose(file) != 0) {
         remove(temporary);
         return fail(err, err_size, "cannot write settings.json");
@@ -55,6 +65,7 @@ int settings_save(const char* path, const AppSettings* settings, char* err, size
 int settings_load(const char* path, AppSettings* settings, char* err, size_t err_size) {
     memset(settings, 0, sizeof(*settings));
     strcpy(settings->default_install_path, "sdmc:/switch");
+    settings->download_proxy[0] = '\0';
 
     FILE* file = fopen(path, "rb");
     if (!file) {
@@ -93,7 +104,19 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
                 settings->default_install_path[--path_length] = '\0';
             if (!settings_valid_path(settings->default_install_path))
                 return fail(err, err_size, "defaultInstallPath must be under sdmc:/switch");
-            break;
+            position = value + 1;
+            continue;
+        }
+        if (tokens[key].type == JSMN_STRING && tokens[value].type == JSMN_STRING &&
+            (size_t)(tokens[key].end - tokens[key].start) == 13 &&
+            memcmp(text + tokens[key].start, "downloadProxy", 13) == 0) {
+            const size_t proxy_length = (size_t)(tokens[value].end - tokens[value].start);
+            if (proxy_length >= sizeof(settings->download_proxy))
+                return fail(err, err_size, "downloadProxy is too long");
+            memcpy(settings->download_proxy, text + tokens[value].start, proxy_length);
+            settings->download_proxy[proxy_length] = '\0';
+            if (!settings_valid_proxy(settings->download_proxy))
+                return fail(err, err_size, "downloadProxy must be an https URL");
         }
         position = value + 1;
     }

@@ -33,6 +33,7 @@
 #define INSTALLED_DIR "sdmc:/switch/brewstore/installed"
 #define README_DIR CACHE_DIR "/readme"
 #define SETTINGS_PATH "sdmc:/switch/brewstore/settings.json"
+#define DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json"
 #define VISIBLE_COLUMNS 3
 #define VISIBLE_ROWS 2
 #define VISIBLE_COUNT (VISIBLE_COLUMNS * VISIBLE_ROWS)
@@ -61,7 +62,18 @@ static int g_selected;
 static int g_scroll_page;
 static bool g_repo_manager;
 static bool g_settings_screen;
+static int g_setting_row;
+enum {
+    CONFIRM_NONE = 0,
+    CONFIRM_DISABLE_REPO,
+    CONFIRM_ENABLE_REPO,
+    CONFIRM_REMOVE_TEST,
+    CONFIRM_DELETE_LOG
+};
+static int g_confirm_action;
+static int g_confirm_index;
 static AppSettings g_settings;
+static FILE* g_catalog_log;
 static bool g_quit;
 static bool g_ignore_b;
 static int g_repo_selected;
@@ -77,6 +89,7 @@ static void refresh_catalogs(bool fetch);
 static bool ends_with_ci(const char* text, const char* suffix);
 static bool prompt_text(const char* header, const char* guide, const char* initial,
                         char* out, size_t out_size);
+static void draw_confirm(Ui* ui);
 
 static void set_status(const char* format, ...) {
     va_list args;
@@ -394,7 +407,11 @@ static void draw_repo_manager(Ui* ui) {
             if (i == g_repo_selected)
                 ui_rect(ui, 24, y - 6, UI_WIDTH - 48, 44, COLOR_CARD_HOVER);
             if (i < g_repos.count) {
-                ui_text_truncated(ui, 40, y, g_repos.urls[i], 16, COLOR_TEXT, UI_WIDTH - 80);
+                ui_text_truncated(ui, 40, y, g_repos.urls[i], 16,
+                                  g_repos.enabled[i] ? COLOR_TEXT : COLOR_MUTED,
+                                  UI_WIDTH - 80);
+                if (!g_repos.enabled[i])
+                    ui_text(ui, UI_WIDTH - 130, y, "(disabled)", 13, COLOR_MUTED);
             } else {
                 ui_text(ui, 40, y, "Test repository", 16, COLOR_TEXT);
                 ui_text(ui, 250, y + 1, "test-repo.json", 14, COLOR_MUTED);
@@ -405,38 +422,82 @@ static void draw_repo_manager(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-    ui_text(ui, 24, 696, "A remove   B close", 13, COLOR_MUTED);
+    ui_text(ui, 24, 696, "A disable/enable   X delete log   B close", 13, COLOR_MUTED);
     ui_end(ui);
 }
 
-static void remove_selected_repository(void) {
-    const int entries = repo_entry_count();
-    if (g_repo_selected < 0 || g_repo_selected >= entries)
+static void draw_confirm(Ui* ui) {
+    if (!ui)
         return;
+    ui_begin(ui);
+    ui_clear(ui, COLOR_BACKGROUND);
+    ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
+    ui_text(ui, 24, 14, "Confirm", 24, COLOR_TEXT);
 
-    char error[256] = {0};
-    if (g_repo_selected < g_repos.count) {
-        if (repos_remove(&g_repos, g_repo_selected) != 0)
-            return;
-        if (repos_save(REPOS_PATH, &g_repos, error, sizeof(error)) != 0) {
-            repos_load(REPOS_PATH, &g_repos, error, sizeof(error));
-            set_status("Could not save repos.json.");
-            draw_repo_manager(g_ui);
-            return;
-        }
-        set_status("Repository removed.");
-    } else {
-        if (remove(TEST_REPO_PATH) != 0) {
-            set_status("Could not remove test-repo.json.");
-            draw_repo_manager(g_ui);
-            return;
-        }
-        set_status("Test repository removed.");
+    const char* message = "Are you sure?";
+    switch (g_confirm_action) {
+        case CONFIRM_DISABLE_REPO: message = "Disable this repository?"; break;
+        case CONFIRM_ENABLE_REPO: message = "Enable this repository?"; break;
+        case CONFIRM_REMOVE_TEST: message = "Remove the test repository?"; break;
+        case CONFIRM_DELETE_LOG: message = "Delete catalog.log?"; break;
+        default: break;
     }
+    ui_text(ui, 24, 120, message, 22, COLOR_TEXT);
+    if (g_confirm_action == CONFIRM_DELETE_LOG)
+        ui_text(ui, 24, 158, CACHE_DIR "/catalog.log", 14, COLOR_MUTED);
+    else if (g_confirm_index >= 0 && g_confirm_index < g_repos.count)
+        ui_text_truncated(ui, 24, 158, g_repos.urls[g_confirm_index], 14,
+                          COLOR_MUTED, UI_WIDTH - 48);
 
-    refresh_catalogs(false);
+    ui_rect(ui, 24, 260, 180, 46, COLOR_ACCENT);
+    ui_text(ui, 90, 273, "A  Yes", 17, COLOR_TEXT);
+    ui_rect(ui, 220, 260, 180, 46, COLOR_CARD);
+    ui_text(ui, 292, 273, "B  No", 17, COLOR_TEXT);
+    ui_text(ui, 24, 696, "A yes   B no", 13, COLOR_MUTED);
+    ui_end(ui);
+}
+
+static void request_repo_action(void) {
     if (g_repo_selected >= repo_entry_count())
-        g_repo_selected = repo_entry_count() ? repo_entry_count() - 1 : 0;
+        return;
+    g_confirm_index = g_repo_selected;
+    if (g_repo_selected >= g_repos.count)
+        g_confirm_action = CONFIRM_REMOVE_TEST;
+    else
+        g_confirm_action = g_repos.enabled[g_repo_selected]
+                               ? CONFIRM_DISABLE_REPO : CONFIRM_ENABLE_REPO;
+    draw_confirm(g_ui);
+}
+
+static void request_log_delete(void) {
+    g_confirm_action = CONFIRM_DELETE_LOG;
+    draw_confirm(g_ui);
+}
+
+static void perform_confirm(void) {
+    char error[256] = {0};
+    if (g_confirm_action == CONFIRM_DELETE_LOG) {
+        if (remove(CACHE_DIR "/catalog.log") == 0)
+            set_status("Catalog log deleted.");
+        else
+            set_status("No catalog log to delete.");
+    } else if (g_confirm_action == CONFIRM_REMOVE_TEST) {
+        if (remove(TEST_REPO_PATH) == 0)
+            set_status("Test repository removed.");
+        else
+            set_status("Could not remove test-repo.json.");
+        refresh_catalogs(false);
+    } else if (g_confirm_index >= 0 && g_confirm_index < g_repos.count) {
+        const bool enable = g_confirm_action == CONFIRM_ENABLE_REPO;
+        g_repos.enabled[g_confirm_index] = enable;
+        if (repos_save(REPOS_PATH, &g_repos, error, sizeof(error)) != 0) {
+            set_status("Could not save repos.json: %s", error);
+        } else {
+            set_status(enable ? "Repository enabled." : "Repository disabled.");
+            refresh_catalogs(false);
+        }
+    }
+    g_confirm_action = CONFIRM_NONE;
     draw_repo_manager(g_ui);
 }
 
@@ -447,11 +508,21 @@ static void draw_settings(Ui* ui) {
     ui_clear(ui, COLOR_BACKGROUND);
     ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
     ui_text(ui, 24, 14, "Settings", 24, COLOR_TEXT);
-    ui_text(ui, 24, 100, "Default install path", 18, COLOR_TEXT);
-    ui_text_truncated(ui, 24, 136, g_settings.default_install_path, 16, COLOR_ACCENT,
-                      UI_WIDTH - 48);
-    ui_text(ui, 24, 180, "Packages without their own target install under this folder.",
-            14, COLOR_MUTED);
+
+    if (g_setting_row == 0)
+        ui_rect(ui, 24, 88, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 98, "Default install path", 17, COLOR_TEXT);
+    ui_text_truncated(ui, 40, 124, g_settings.default_install_path, 15, COLOR_ACCENT,
+                      UI_WIDTH - 80);
+
+    if (g_setting_row == 1)
+        ui_rect(ui, 24, 156, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 166, "Download proxy", 17, COLOR_TEXT);
+    ui_text_truncated(ui, 40, 192,
+                      g_settings.download_proxy[0] ? g_settings.download_proxy : "(none)",
+                      15, g_settings.download_proxy[0] ? COLOR_ACCENT : COLOR_MUTED,
+                      UI_WIDTH - 80);
+
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
@@ -486,6 +557,31 @@ static void edit_default_path(void) {
     path_mkdirs(g_settings.default_install_path);
     refresh_catalogs(false);
     set_status("Default install path saved.");
+    draw_settings(g_ui);
+}
+
+static void edit_proxy(void) {
+    char proxy[256];
+    if (!prompt_text("Download proxy", "URL prefix, or empty to disable",
+                     g_settings.download_proxy, proxy, sizeof(proxy))) {
+        set_status("Proxy edit cancelled.");
+        draw_settings(g_ui);
+        return;
+    }
+    if (!settings_valid_proxy(proxy)) {
+        set_status("Proxy must be an https URL or empty.");
+        draw_settings(g_ui);
+        return;
+    }
+    char error[128] = {0};
+    snprintf(g_settings.download_proxy, sizeof(g_settings.download_proxy), "%s", proxy);
+    if (settings_save(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0) {
+        set_status("Could not save settings: %s", error);
+        draw_settings(g_ui);
+        return;
+    }
+    http_set_proxy_prefix(g_settings.download_proxy);
+    set_status(g_settings.download_proxy[0] ? "Download proxy saved." : "Download proxy disabled.");
     draw_settings(g_ui);
 }
 
@@ -801,41 +897,120 @@ static void repo_cache_path(const char* url, char* out, size_t out_size) {
     snprintf(out, out_size, REPO_CACHE_DIR "/%08x.json", hash);
 }
 
+static int resolve_include(const char* base, const char* include,
+                           char* out, size_t out_size) {
+    if (strncmp(include, "https://", 8) == 0 || strncmp(include, "sdmc:", 5) == 0) {
+        if (strlen(include) >= out_size)
+            return -1;
+        strcpy(out, include);
+        return 0;
+    }
+    const char* slash = strrchr(base, '/');
+    if (!slash)
+        return -1;
+    const int written = snprintf(out, out_size, "%.*s%s",
+                                 (int)(slash - base + 1), base, include);
+    return written > 0 && (size_t)written < out_size ? 0 : -1;
+}
+
+static bool load_catalog_file(const char* path, const char* base, bool fetch,
+                              int depth, int* failures, char* err, size_t err_size) {
+    if (depth > 8) {
+        snprintf(err, err_size, "include depth exceeded");
+        return false;
+    }
+    HbManifest manifest;
+    if (manifest_load(path, &manifest, err, err_size) != 0) {
+        if (g_catalog_log)
+            fprintf(g_catalog_log, "FAIL %s: %s\n", path, err);
+        (*failures)++;
+        return false;
+    }
+    if (g_catalog_log)
+        fprintf(g_catalog_log, "OK %s packages=%d includes=%d\n",
+                path, manifest.count, manifest.include_count);
+    append_catalog(&manifest);
+
+    for (int i = 0; i < manifest.include_count; i++) {
+        char included[640];
+        if (resolve_include(base, manifest.includes[i], included, sizeof(included)) != 0) {
+            if (g_catalog_log)
+                fprintf(g_catalog_log, "FAIL resolve %s\n", manifest.includes[i]);
+            (*failures)++;
+            continue;
+        }
+        if (strncmp(included, "https://", 8) == 0) {
+            char cache[640];
+            repo_cache_path(included, cache, sizeof(cache));
+            if ((fetch || access(cache, F_OK) != 0) && g_network_ready) {
+                char hash[65];
+                char download_error[128];
+                if (http_download(included, cache, hash, download_error,
+                                  sizeof(download_error)) != 0) {
+                    if (g_catalog_log)
+                        fprintf(g_catalog_log, "FAIL download %s: %s\n",
+                                included, download_error);
+                    (*failures)++;
+                    continue;
+                }
+            }
+            if (access(cache, F_OK) != 0) {
+                (*failures)++;
+                continue;
+            }
+            load_catalog_file(cache, included, fetch, depth + 1, failures,
+                              err, err_size);
+        } else {
+            if (access(included, F_OK) != 0) {
+                (*failures)++;
+                continue;
+            }
+            load_catalog_file(included, included, fetch, depth + 1, failures,
+                              err, err_size);
+        }
+    }
+    return true;
+}
+
 static void refresh_catalogs(bool fetch) {
     char error[256] = {0};
+    int failures = 0;
     g_manifest.count = 0;
     g_manifest_error[0] = '\0';
     path_mkdirs(REPO_CACHE_DIR);
+    g_catalog_log = fopen(CACHE_DIR "/catalog.log", "w");
 
-    HbManifest local;
-    if (manifest_load(MANIFEST_PATH, &local, error, sizeof(error)) == 0) {
-        append_catalog(&local);
-    } else if (access(MANIFEST_PATH, F_OK) == 0) {
+    if (access(MANIFEST_PATH, F_OK) == 0 &&
+        !load_catalog_file(MANIFEST_PATH, MANIFEST_PATH, false, 0, &failures,
+                           error, sizeof(error)))
         snprintf(g_manifest_error, sizeof(g_manifest_error), "%s", error);
-    }
 
-    HbManifest test;
-    if (manifest_load(TEST_REPO_PATH, &test, error, sizeof(error)) == 0) {
-        for (int i = 0; i < test.count; i++) {
-            test.items[i].target_explicit = false;
-            if (strcmp(test.items[i].version, "test") == 0)
-                snprintf(test.items[i].version, sizeof(test.items[i].version), "latest");
-            if (strcmp(test.items[i].author, "Git") == 0 ||
-                strcmp(test.items[i].author, "Miella Selene / Xayah") == 0) {
-                char owner[128];
-                char repo[128];
-                if (github_repo_parts(test.items[i].url, owner, sizeof(owner),
-                                      repo, sizeof(repo)) == 0)
-                    snprintf(test.items[i].author, sizeof(test.items[i].author), "%.63s", owner);
+    if (access(TEST_REPO_PATH, F_OK) == 0) {
+        HbManifest test;
+        if (manifest_load(TEST_REPO_PATH, &test, error, sizeof(error)) == 0) {
+            for (int i = 0; i < test.count; i++) {
+                test.items[i].target_explicit = false;
+                if (strcmp(test.items[i].version, "test") == 0)
+                    snprintf(test.items[i].version, sizeof(test.items[i].version), "latest");
+                if (strcmp(test.items[i].author, "Git") == 0 ||
+                    strcmp(test.items[i].author, "Miella Selene / Xayah") == 0) {
+                    char owner[128];
+                    char repo[128];
+                    if (github_repo_parts(test.items[i].url, owner, sizeof(owner),
+                                          repo, sizeof(repo)) == 0)
+                        snprintf(test.items[i].author, sizeof(test.items[i].author),
+                                 "%.63s", owner);
+                }
             }
+            append_catalog(&test);
+        } else {
+            failures++;
         }
-        append_catalog(&test);
-    } else if (access(TEST_REPO_PATH, F_OK) == 0 && !g_manifest_error[0]) {
-        snprintf(g_manifest_error, sizeof(g_manifest_error), "%s", error);
     }
 
-    int failures = 0;
     for (int i = 0; i < g_repos.count; i++) {
+        if (!g_repos.enabled[i])
+            continue;
         char cache[640];
         repo_cache_path(g_repos.urls[i], cache, sizeof(cache));
         bool present = access(cache, F_OK) == 0;
@@ -855,15 +1030,15 @@ static void refresh_catalogs(bool fetch) {
             failures++;
             continue;
         }
+        load_catalog_file(cache, g_repos.urls[i], fetch, 0, &failures,
+                          error, sizeof(error));
+    }
 
-        HbManifest remote;
-        if (manifest_load(cache, &remote, error, sizeof(error)) == 0) {
-            append_catalog(&remote);
-        } else {
-            failures++;
-            if (!g_manifest_error[0])
-                snprintf(g_manifest_error, sizeof(g_manifest_error), "%s", error);
-        }
+    if (g_catalog_log) {
+        fprintf(g_catalog_log, "TOTAL packages=%d failures=%d\n",
+                g_manifest.count, failures);
+        fclose(g_catalog_log);
+        g_catalog_log = NULL;
     }
 
     if (g_selected >= g_manifest.count)
@@ -914,7 +1089,7 @@ static bool prompt_text(const char* header, const char* guide, const char* initi
                           end[-1] == '\r' || end[-1] == '\n'))
         end--;
     *end = '\0';
-    if (!*start || strlen(start) >= out_size)
+    if (strlen(start) >= out_size)
         return false;
     strcpy(out, start);
     return true;
@@ -1130,15 +1305,23 @@ int main(void) {
     if (settings_load(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0)
         snprintf(g_status, sizeof(g_status), "settings.json: %s", error);
 
-    if (repos_load(REPOS_PATH, &g_repos, error, sizeof(error)) != 0)
+    if (repos_load(REPOS_PATH, &g_repos, error, sizeof(error)) != 0) {
         snprintf(g_status, sizeof(g_status), "repos.json: %s", error);
+    } else if (g_repos.count == 0) {
+        repos_add(&g_repos, DEFAULT_REPO_URL);
+        if (repos_save(REPOS_PATH, &g_repos, error, sizeof(error)) != 0)
+            snprintf(g_status, sizeof(g_status), "repos.json: %s", error);
+    }
 
     g_network_ready = http_global_init(error, sizeof(error)) == 0;
     if (!g_network_ready)
         snprintf(g_status, sizeof(g_status), "Network init failed: %s", error);
+    http_set_proxy_prefix(g_settings.download_proxy);
 
     hidInitializeKeyboard();
     refresh_catalogs(false);
+    if (!g_manifest.count && g_repos.count > 0)
+        refresh_catalogs(true);
     draw_shop(&ui);
 
     while (!g_quit && appletMainLoop()) {
@@ -1162,6 +1345,19 @@ int main(void) {
         const bool key_settings = keyboard_edge(&keyboard, HidKeyboardKey_S);
         const bool key_exit = keyboard_edge(&keyboard, HidKeyboardKey_Escape);
 
+        if (g_confirm_action != CONFIRM_NONE) {
+            if ((down & HidNpadButton_A) || key_accept)
+                perform_confirm();
+            else if ((down & HidNpadButton_B) || key_exit)
+                g_confirm_action = CONFIRM_NONE;
+            memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
+            if (g_confirm_action == CONFIRM_NONE)
+                draw_repo_manager(&ui);
+            else
+                draw_confirm(&ui);
+            continue;
+        }
+
         if (g_settings_screen) {
             if (down & HidNpadButton_Plus)
                 break;
@@ -1169,8 +1365,17 @@ int main(void) {
             if ((down & (HidNpadButton_B | HidNpadButton_ZL)) || key_exit) {
                 g_settings_screen = false;
                 draw_shop(&ui);
+            } else if ((down & HidNpadButton_Up) || key_up) {
+                g_setting_row = 0;
+                changed = true;
+            } else if ((down & HidNpadButton_Down) || key_down) {
+                g_setting_row = 1;
+                changed = true;
             } else if ((down & HidNpadButton_A) || key_accept) {
-                edit_default_path();
+                if (g_setting_row == 0)
+                    edit_default_path();
+                else
+                    edit_proxy();
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)
@@ -1194,7 +1399,9 @@ int main(void) {
                 g_repo_selected++;
                 changed = true;
             } else if ((down & HidNpadButton_A) || key_accept) {
-                remove_selected_repository();
+                request_repo_action();
+            } else if ((down & HidNpadButton_X) || key_refresh) {
+                request_log_delete();
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)

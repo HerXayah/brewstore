@@ -6,6 +6,7 @@
 
 /// One-time network/TLS setup for the app.
 int http_global_init(char* err, size_t err_size);
+void http_set_proxy_prefix(const char* prefix);
 void http_global_exit(void);
 
 typedef void (*HttpProgressCallback)(unsigned long long received,

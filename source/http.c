@@ -58,6 +58,7 @@ typedef struct {
 
 static bool g_network_ready;
 static bool g_ssl_ready;
+static char g_proxy_prefix[256];
 
 static void set_error(char* err, size_t err_size, const char* format, ...) {
     if (!err || !err_size)
@@ -538,8 +539,21 @@ static int download_once(const char* url, const char* dest, char sha256_hex[65],
                          char* err, size_t err_size, HttpProgressCallback progress,
                          void* user, HttpCancelCallback cancel, void* cancel_user,
                          int depth) {
+    char proxied[1400];
+    const char* request_url = url;
+    if (g_proxy_prefix[0] && starts_with(url, "https://") &&
+        !starts_with(url, g_proxy_prefix)) {
+        const int written = snprintf(proxied, sizeof(proxied), "%s%s",
+                                     g_proxy_prefix, url);
+        if (written <= 0 || (size_t)written >= sizeof(proxied)) {
+            set_error(err, err_size, "proxy URL is too long");
+            return -1;
+        }
+        request_url = proxied;
+    }
+
     Url parsed;
-    if (url_parse(url, &parsed) != 0) {
+    if (url_parse(request_url, &parsed) != 0) {
         set_error(err, err_size, "invalid HTTPS URL");
         return -1;
     }
@@ -565,7 +579,7 @@ static int download_once(const char* url, const char* dest, char sha256_hex[65],
             return -1;
         }
         char next[1024];
-        if (url_join(url, response.location, next, sizeof(next)) != 0) {
+        if (url_join(request_url, response.location, next, sizeof(next)) != 0) {
             set_error(err, err_size, "invalid redirect URL");
             tls_close(&tls);
             return -1;
@@ -632,6 +646,18 @@ void http_global_exit(void) {
     if (g_network_ready) {
         socketExit();
         g_network_ready = false;
+    }
+}
+
+void http_set_proxy_prefix(const char* prefix) {
+    g_proxy_prefix[0] = '\0';
+    if (!prefix || !prefix[0])
+        return;
+    snprintf(g_proxy_prefix, sizeof(g_proxy_prefix), "%s", prefix);
+    const size_t length = strlen(g_proxy_prefix);
+    if (length && g_proxy_prefix[length - 1] != '/' && length + 1 < sizeof(g_proxy_prefix)) {
+        g_proxy_prefix[length] = '/';
+        g_proxy_prefix[length + 1] = '\0';
     }
 }
 

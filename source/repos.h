@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #define HBPKG_MAX_REPOS 8
 
 typedef struct {
     char urls[HBPKG_MAX_REPOS][512];
+    bool enabled[HBPKG_MAX_REPOS];
     int count;
 } RepoList;
 
