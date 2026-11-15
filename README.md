@@ -4,6 +4,13 @@ A simple **homebrew** shop for Switch 2.
 It is a homebrew NRO. It does not install NSPs, touch NAND, register services,
 or add a Home Menu tile.  
 
+Currently uses a fork of [hbmenu](https://github.com/ouncebrew/ounce-hbmenu/pull/1)  
+
+## Disclaimer
+
+I am not responsible for any bricks, lost data or anything else.  
+Use this tool on you own responsibility.
+
 ## Build
 
 ```sh
