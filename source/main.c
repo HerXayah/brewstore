@@ -745,6 +745,34 @@ static bool is_plain_github_repo(const char* url) {
            !strstr(url, ".nro");
 }
 
+static void draw_install_progress(Ui* ui, const char* title, const char* step,
+                                  int percent) {
+    if (!ui)
+        return;
+    ui_begin(ui);
+    ui_clear(ui, COLOR_BACKGROUND);
+    ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
+    ui_text(ui, 24, 14, "Installing", 24, COLOR_TEXT);
+    ui_text_truncated(ui, 28, 96, title, 20, COLOR_TEXT, UI_WIDTH - 56);
+    ui_text(ui, 28, 132, step, 16, COLOR_MUTED);
+
+    const int bar_x = 28;
+    const int bar_y = 340;
+    const int bar_width = UI_WIDTH - 56;
+    const int bar_height = 18;
+    ui_rect(ui, bar_x, bar_y, bar_width, bar_height, COLOR_CARD);
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+    const int filled = bar_width * percent / 100;
+    ui_rect(ui, bar_x, bar_y, filled, bar_height, COLOR_ACCENT);
+    char line[64];
+    snprintf(line, sizeof(line), "%d%%", percent);
+    ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
+    ui_end(ui);
+}
+
 static void install_package(const HbPackage* package, PadState* pad) {
     if (!g_network_ready) {
         set_status("Network is unavailable.");
@@ -814,14 +842,16 @@ static void install_package(const HbPackage* package, PadState* pad) {
         return;
     }
 
-    set_status("Installing %s ...", package->title);
-    draw_shop(g_ui);
+    draw_install_progress(g_ui, package->title, "Preparing install", 10);
     if (path_mkdirs(package->target) != 0) {
         set_status("Could not prepare the install target.");
         draw_shop(g_ui);
         return;
     }
 
+    draw_install_progress(g_ui, package->title,
+                          asset_name[0] && !ends_with_ci(asset_name, ".zip")
+                              ? "Writing application" : "Extracting files", 45);
     char installed_file[512] = "";
     if (asset_name[0]) {
         if (ends_with_ci(asset_name, ".zip")) {
@@ -845,6 +875,7 @@ static void install_package(const HbPackage* package, PadState* pad) {
         return;
     }
 
+    draw_install_progress(g_ui, package->title, "Finishing", 90);
     write_state(package, hash, installed_file);
     if (strcmp(package->version, "latest") == 0 ||
         strcmp(package->version, "test") == 0 ||
