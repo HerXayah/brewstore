@@ -59,6 +59,11 @@ typedef struct {
 static HbManifest g_manifest;
 static RepoList g_repos;
 static int g_selected;
+enum { FILTER_ALL = 0, FILTER_UPDATES, FILTER_INSTALLED, FILTER_NOT_INSTALLED };
+static int g_filter;
+static bool g_context_menu;
+static int g_context_selected;
+static PadState* g_pad;
 static int g_scroll_page;
 static bool g_repo_manager;
 static bool g_settings_screen;
@@ -91,6 +96,8 @@ static bool ends_with_ci(const char* text, const char* suffix);
 static bool prompt_text(const char* header, const char* guide, const char* initial,
                         char* out, size_t out_size);
 static void draw_confirm(Ui* ui);
+static void add_test_repo(void);
+static void add_repository(void);
 
 static void set_status(const char* format, ...) {
     va_list args;
@@ -182,6 +189,53 @@ static bool update_available(const HbPackage* package) {
         strcasecmp(package->sha256, installed_hash) != 0)
         return true;
     return false;
+}
+
+static const char* filter_name(void) {
+    switch (g_filter) {
+        case FILTER_UPDATES: return "Updates";
+        case FILTER_INSTALLED: return "Installed";
+        case FILTER_NOT_INSTALLED: return "Not installed";
+        default: return "All";
+    }
+}
+
+static bool filter_matches(const HbPackage* package) {
+    switch (g_filter) {
+        case FILTER_UPDATES: return update_available(package);
+        case FILTER_INSTALLED: return is_installed(package);
+        case FILTER_NOT_INSTALLED: return !is_installed(package);
+        default: return true;
+    }
+}
+
+static int visible_count(void) {
+    int count = 0;
+    for (int i = 0; i < g_manifest.count; i++) {
+        if (filter_matches(&g_manifest.items[i]))
+            count++;
+    }
+    return count;
+}
+
+static HbPackage* visible_package(int index) {
+    int current = 0;
+    for (int i = 0; i < g_manifest.count; i++) {
+        if (!filter_matches(&g_manifest.items[i]))
+            continue;
+        if (current++ == index)
+            return &g_manifest.items[i];
+    }
+    return NULL;
+}
+
+static void clamp_selection(void) {
+    const int count = visible_count();
+    if (g_selected >= count)
+        g_selected = count ? count - 1 : 0;
+    if (g_selected < 0)
+        g_selected = 0;
+    g_scroll_page = count ? g_selected / VISIBLE_COUNT : 0;
 }
 
 static void free_icons(void) {
@@ -330,14 +384,17 @@ static bool readme_for(HbPackage* package) {
 static void draw_shop(Ui* ui) {
     if (!ui)
         return;
-    if (g_manifest.count)
-        readme_for(&g_manifest.items[g_selected]);
-    if (g_manifest.count) {
+    const int visible = visible_count();
+    HbPackage* selected = visible ? visible_package(g_selected) : NULL;
+    if (selected)
+        readme_for(selected);
+    if (visible) {
         const int first = g_scroll_page * VISIBLE_COUNT;
         for (int slot = 0; slot < VISIBLE_COUNT; slot++) {
             const int index = first + slot;
-            if (index < g_manifest.count)
-                icon_for(&g_manifest.items[index]);
+            HbPackage* package = index < visible ? visible_package(index) : NULL;
+            if (package)
+                icon_for(package);
         }
     }
     ui_begin(ui);
@@ -347,24 +404,32 @@ static void draw_shop(Ui* ui) {
     ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
     ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
             "Codename YukinaMinato", 9, COLOR_MUTED);
+    const char* filter = filter_name();
+    const int filter_width = ui_text_width(ui, filter, 13);
+    ui_text(ui, UI_WIDTH - 24 - filter_width, 25, filter, 13, COLOR_ACCENT);
 
     if (!g_manifest.count) {
         ui_text(ui, 24, 104, "Nothing here yet", 26, COLOR_TEXT);
-        ui_text(ui, 24, 146, "Press R for a catalog, or L for one git repo.", 16, COLOR_MUTED);
+        ui_text(ui, 24, 146, "Press R for a catalog, or ZR for repo actions.", 16, COLOR_MUTED);
         ui_text(ui, 24, 174, REPOS_PATH, 13, COLOR_ACCENT);
+    } else if (!selected) {
+        ui_text(ui, 24, 104, "Nothing matches this filter", 26, COLOR_TEXT);
+        ui_text(ui, 24, 146, "Press Y to change filter.", 16, COLOR_MUTED);
     } else {
         const int first = g_scroll_page * VISIBLE_COUNT;
         for (int slot = 0; slot < VISIBLE_COUNT; slot++) {
             const int index = first + slot;
-            if (index >= g_manifest.count)
+            if (index >= visible)
+                break;
+            HbPackage* package = visible_package(index);
+            if (!package)
                 break;
             const int column = slot % VISIBLE_COLUMNS;
             const int row = slot / VISIBLE_COLUMNS;
-            draw_card(ui, &g_manifest.items[index], 32 + column * 292,
+            draw_card(ui, package, 32 + column * 292,
                       76 + row * 248, index == g_selected);
         }
 
-        const HbPackage* selected = &g_manifest.items[g_selected];
         ui_rect(ui, 936, 76, 312, 568, COLOR_PANEL);
 
         ui_text_truncated(ui, 958, 100, selected->title, 25, COLOR_TEXT, 268);
@@ -381,7 +446,7 @@ static void draw_shop(Ui* ui) {
         ui_text_truncated(ui, 958, 522, selected->target, 12, COLOR_MUTED, 268);
         const int button_y = 556;
         const char* primary_label = is_installed(selected) ? "A  Update" : "A  Install";
-        const char* secondary_label = "Y  Remove";
+        const char* secondary_label = "X  Menu";
         const int primary_width = ui_text_width(ui, primary_label, 15);
         const int secondary_width = ui_text_width(ui, secondary_label, 15);
         ui_rect(ui, 958, button_y, 128, 42,
@@ -396,10 +461,10 @@ static void draw_shop(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0]) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-        ui_text(ui, 24, 696, "A install   Y remove   X refresh   R catalog   L git repo   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 696, "A install   X menu   Y filter   ZR repos   ZL settings   B exit",
                 12, COLOR_MUTED);
     } else {
-        ui_text(ui, 24, 682, "A install   Y remove   X refresh   R catalog   L git repo   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 682, "A install   X menu   Y filter   ZR repos   ZL settings   B exit",
                 13, COLOR_MUTED);
     }
 
@@ -448,7 +513,7 @@ static void draw_repo_manager(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-    ui_text(ui, 24, 696, "A disable/enable   X delete log   B close", 13, COLOR_MUTED);
+    ui_text(ui, 24, 696, "A disable/enable   R catalog   L git repo   X delete log   B close", 13, COLOR_MUTED);
     ui_end(ui);
 }
 
@@ -911,6 +976,61 @@ static void remove_package(const HbPackage* package) {
     draw_shop(g_ui);
 }
 
+static void draw_context(Ui* ui) {
+    if (!ui)
+        return;
+    static const char* const options[] = {
+        "Install / Update", "Remove", "Add git repo", "Refresh catalogs"
+    };
+    ui_begin(ui);
+    ui_clear(ui, COLOR_BACKGROUND);
+    ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
+    ui_text(ui, 24, 14, "Actions", 24, COLOR_TEXT);
+    for (int i = 0; i < 4; i++) {
+        const int y = 90 + i * 58;
+        if (i == g_context_selected)
+            ui_rect(ui, 24, y - 8, UI_WIDTH - 48, 48, COLOR_CARD_HOVER);
+        ui_text(ui, 44, y, options[i], 19,
+                i == g_context_selected ? COLOR_TEXT : COLOR_MUTED);
+    }
+    ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
+    ui_text(ui, 24, 682, "A select   B close", 13, COLOR_MUTED);
+    ui_end(ui);
+}
+
+static void context_action(void) {
+    HbPackage* package = visible_package(g_selected);
+    if (!package)
+        return;
+    switch (g_context_selected) {
+        case 0:
+            g_context_menu = false;
+            install_package(package, g_pad);
+            return;
+        case 1:
+            g_context_menu = false;
+            if (is_installed(package)) {
+                remove_package(package);
+                clamp_selection();
+            } else {
+                set_status("%s is not installed.", package->title);
+                draw_shop(g_ui);
+            }
+            return;
+        case 2:
+            g_context_menu = false;
+            add_test_repo();
+            return;
+        case 3:
+            g_context_menu = false;
+            refresh_catalogs(true);
+            draw_shop(g_ui);
+            return;
+        default:
+            return;
+    }
+}
+
 static void append_catalog(const HbManifest* source) {
     for (int i = 0; i < source->count && g_manifest.count < HBPKG_MAX_PACKAGES; i++) {
         bool duplicate = false;
@@ -1104,9 +1224,7 @@ static void refresh_catalogs(bool fetch) {
         g_catalog_log = NULL;
     }
 
-    if (g_selected >= g_manifest.count)
-        g_selected = g_manifest.count ? g_manifest.count - 1 : 0;
-    g_scroll_page = g_selected / VISIBLE_COUNT;
+    clamp_selection();
 
     if (!g_manifest.count) {
         if (g_manifest_error[0])
@@ -1287,9 +1405,11 @@ static void add_test_repo(void) {
         draw_shop(g_ui);
         return;
     }
+    g_filter = FILTER_ALL;
     refresh_catalogs(false);
-    for (int i = 0; i < g_manifest.count; i++) {
-        if (strcmp(g_manifest.items[i].url, url) == 0) {
+    for (int i = 0; i < visible_count(); i++) {
+        HbPackage* package = visible_package(i);
+        if (package && strcmp(package->url, url) == 0) {
             g_selected = i;
             g_scroll_page = i / VISIBLE_COUNT;
             break;
@@ -1336,13 +1456,14 @@ static bool keyboard_edge(const HidKeyboardState* state, HidKeyboardKey key) {
 }
 
 static void move_selection(int delta) {
-    if (!g_manifest.count)
+    const int count = visible_count();
+    if (!count)
         return;
     int next = g_selected + delta;
     if (next < 0)
         next = 0;
-    if (next >= g_manifest.count)
-        next = g_manifest.count - 1;
+    if (next >= count)
+        next = count - 1;
     g_selected = next;
     g_scroll_page = g_selected / VISIBLE_COUNT;
 }
@@ -1358,6 +1479,7 @@ int main(void) {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
+    g_pad = &pad;
 
     path_mkdirs(CACHE_DIR);
     path_mkdirs(ICON_DIR);
@@ -1436,6 +1558,28 @@ int main(void) {
             continue;
         }
 
+        if (g_context_menu) {
+            bool changed = false;
+            if ((down & HidNpadButton_Up) || key_up) {
+                if (g_context_selected > 0)
+                    g_context_selected--;
+                changed = true;
+            } else if ((down & HidNpadButton_Down) || key_down) {
+                if (g_context_selected < 3)
+                    g_context_selected++;
+                changed = true;
+            } else if ((down & HidNpadButton_A) || key_accept) {
+                context_action();
+            } else if ((down & HidNpadButton_B) || key_exit) {
+                g_context_menu = false;
+                draw_shop(&ui);
+            }
+            memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
+            if (changed)
+                draw_context(&ui);
+            continue;
+        }
+
         if (g_settings_screen) {
             if (down & HidNpadButton_Plus)
                 break;
@@ -1480,6 +1624,12 @@ int main(void) {
                 request_repo_action();
             } else if ((down & HidNpadButton_X) || key_refresh) {
                 request_log_delete();
+            } else if ((down & HidNpadButton_L) || key_test) {
+                g_repo_manager = false;
+                add_test_repo();
+            } else if ((down & HidNpadButton_R) || key_add) {
+                g_repo_manager = false;
+                add_repository();
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)
@@ -1530,20 +1680,28 @@ int main(void) {
             move_selection(VISIBLE_COLUMNS);
             changed = true;
         } else if ((down & HidNpadButton_X) || key_refresh) {
-            refresh_catalogs(true);
-            changed = true;
+            if (visible_count()) {
+                g_context_menu = true;
+                g_context_selected = 0;
+                draw_context(&ui);
+                memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
+                continue;
+            }
         } else if ((down & HidNpadButton_R) || key_add) {
             add_repository();
             changed = true;
-        } else if ((down & HidNpadButton_L) || key_test) {
-            add_test_repo();
+        } else if ((down & HidNpadButton_Y) || key_remove) {
+            g_filter = (g_filter + 1) % 4;
+            g_selected = 0;
+            g_scroll_page = 0;
+            clamp_selection();
             changed = true;
-        } else if (g_manifest.count && ((down & HidNpadButton_A) || key_accept)) {
-            install_package(&g_manifest.items[g_selected], &pad);
-            changed = true;
-        } else if (g_manifest.count && ((down & HidNpadButton_Y) || key_remove)) {
-            remove_package(&g_manifest.items[g_selected]);
-            changed = true;
+        } else if (visible_count() && ((down & HidNpadButton_A) || key_accept)) {
+            HbPackage* package = visible_package(g_selected);
+            if (package) {
+                install_package(package, &pad);
+                changed = true;
+            }
         }
 
         memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));

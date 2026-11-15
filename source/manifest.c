@@ -19,14 +19,102 @@ static int fail(char* err, size_t err_size, const char* message) {
     return -1;
 }
 
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int read_hex4(const char* text, unsigned* value) {
+    unsigned result = 0;
+    for (int i = 0; i < 4; i++) {
+        const int digit = hex_value(text[i]);
+        if (digit < 0)
+            return -1;
+        result = (result << 4) | (unsigned)digit;
+    }
+    *value = result;
+    return 0;
+}
+
+static int utf8_append(char* out, size_t out_size, size_t* used, unsigned codepoint) {
+    unsigned char bytes[4];
+    int count;
+    if (codepoint <= 0x7f) {
+        bytes[0] = (unsigned char)codepoint;
+        count = 1;
+    } else if (codepoint <= 0x7ff) {
+        bytes[0] = (unsigned char)(0xc0 | (codepoint >> 6));
+        bytes[1] = (unsigned char)(0x80 | (codepoint & 0x3f));
+        count = 2;
+    } else if (codepoint <= 0xffff) {
+        bytes[0] = (unsigned char)(0xe0 | (codepoint >> 12));
+        bytes[1] = (unsigned char)(0x80 | ((codepoint >> 6) & 0x3f));
+        bytes[2] = (unsigned char)(0x80 | (codepoint & 0x3f));
+        count = 3;
+    } else if (codepoint <= 0x10ffff) {
+        bytes[0] = (unsigned char)(0xf0 | (codepoint >> 18));
+        bytes[1] = (unsigned char)(0x80 | ((codepoint >> 12) & 0x3f));
+        bytes[2] = (unsigned char)(0x80 | ((codepoint >> 6) & 0x3f));
+        bytes[3] = (unsigned char)(0x80 | (codepoint & 0x3f));
+        count = 4;
+    } else {
+        return -1;
+    }
+    if (*used + (size_t)count >= out_size)
+        return -1;
+    memcpy(out + *used, bytes, (size_t)count);
+    *used += (size_t)count;
+    return 0;
+}
+
 static int token_string(const char* json, const jsmntok_t* token, char* out, size_t out_size) {
     if (!token || token->type != JSMN_STRING || token->end < token->start || !out_size)
         return -1;
-    const size_t length = (size_t)(token->end - token->start);
-    if (length >= out_size)
-        return -1;
-    memcpy(out, json + token->start, length);
-    out[length] = '\0';
+    const char* input = json + token->start;
+    const char* end = json + token->end;
+    size_t used = 0;
+    while (input < end && used + 1 < out_size) {
+        if (*input != '\\') {
+            out[used++] = *input++;
+            continue;
+        }
+        input++;
+        if (input >= end)
+            return -1;
+        switch (*input) {
+            case '"': out[used++] = '"'; input++; break;
+            case '\\': out[used++] = '\\'; input++; break;
+            case '/': out[used++] = '/'; input++; break;
+            case 'b': out[used++] = '\b'; input++; break;
+            case 'f': out[used++] = '\f'; input++; break;
+            case 'n': out[used++] = '\n'; input++; break;
+            case 'r': out[used++] = '\r'; input++; break;
+            case 't': out[used++] = '\t'; input++; break;
+            case 'u': {
+                unsigned codepoint = 0;
+                if (input + 4 >= end || read_hex4(input + 1, &codepoint) != 0)
+                    return -1;
+                input += 5;
+                if (codepoint >= 0xd800 && codepoint <= 0xdbff &&
+                    input + 5 < end && input[0] == '\\' && input[1] == 'u') {
+                    unsigned low = 0;
+                    if (read_hex4(input + 2, &low) == 0 &&
+                        low >= 0xdc00 && low <= 0xdfff) {
+                        codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + (low - 0xdc00);
+                        input += 6;
+                    }
+                }
+                if (utf8_append(out, out_size, &used, codepoint) != 0)
+                    return -1;
+                break;
+            }
+            default:
+                return -1;
+        }
+    }
+    out[used] = '\0';
     return 0;
 }
 
