@@ -98,6 +98,11 @@ static int ends_with_ci(const char* text, const char* suffix) {
     return strcasecmp(text + text_length - suffix_length, suffix) == 0;
 }
 
+static bool is_debug_asset(const char* name) {
+    return strcasestr(name, "debug") || strcasestr(name, "symbols") ||
+           strcasestr(name, "source");
+}
+
 static int read_file(const char* path, char** out, size_t* out_size, char* err, size_t err_size) {
     FILE* file = fopen(path, "rb");
     if (!file)
@@ -203,7 +208,8 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
                 free(tokens);
                 free(json);
                 return 0;
-            } else if (!fallback_name[0] && ends_with_ci(name, ".zip")) {
+            } else if (!fallback_name[0] && ends_with_ci(name, ".zip") &&
+                       !is_debug_asset(name)) {
                 snprintf(fallback_url, sizeof(fallback_url), "%s", url);
                 snprintf(fallback_name, sizeof(fallback_name), "%s", name);
                 fallback_size = size;

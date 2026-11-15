@@ -442,7 +442,7 @@ static int write_body(FILE* file, Sha256Context* sha, unsigned long long* total,
                       HttpProgressCallback progress, void* user,
                       char* err, size_t err_size) {
     if (*total + length > HTTP_MAX_BODY) {
-        set_error(err, err_size, "download exceeds 64 MiB limit");
+        set_error(err, err_size, "download exceeds 1 GiB limit");
         return -1;
     }
     if (fwrite(data, 1, length, file) != length) {
@@ -599,7 +599,14 @@ static int download_once(const char* url, const char* dest, char sha256_hex[65],
         return -1;
     }
 
-    FILE* file = fopen(dest, "wb");
+    char temporary[644];
+    const int written = snprintf(temporary, sizeof(temporary), "%.639s.tmp", dest);
+    if (written <= 0 || (size_t)written >= sizeof(temporary)) {
+        set_error(err, err_size, "download cache path is too long");
+        tls_close(&tls);
+        return -1;
+    }
+    FILE* file = fopen(temporary, "wb");
     if (!file) {
         set_error(err, err_size, "cannot create download cache");
         tls_close(&tls);
@@ -611,12 +618,27 @@ static int download_once(const char* url, const char* dest, char sha256_hex[65],
     if (copy_body(&reader, &response, file, &sha, progress, user, cancel, cancel_user,
                   err, err_size) != 0) {
         fclose(file);
-        remove(dest);
+        remove(temporary);
         tls_close(&tls);
         return -1;
     }
-    fflush(file);
-    fclose(file);
+    const int flush_result = fflush(file);
+    const int close_result = fclose(file);
+    if (flush_result != 0 || close_result != 0) {
+        remove(temporary);
+        set_error(err, err_size, "cannot finish download cache");
+        tls_close(&tls);
+        return -1;
+    }
+    if (rename(temporary, dest) != 0) {
+        remove(dest);
+        if (rename(temporary, dest) != 0) {
+            remove(temporary);
+            set_error(err, err_size, "cannot replace download cache");
+            tls_close(&tls);
+            return -1;
+        }
+    }
     u8 digest[SHA256_HASH_SIZE];
     sha256ContextGetHash(&sha, digest);
     sha_to_hex(digest, sha256_hex);

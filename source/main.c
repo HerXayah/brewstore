@@ -42,6 +42,7 @@
 #define VISIBLE_COLUMNS 3
 #define VISIBLE_ROWS 2
 #define VISIBLE_COUNT (VISIBLE_COLUMNS * VISIBLE_ROWS)
+#define REPO_VISIBLE_ROWS 10
 
 #define COLOR_BACKGROUND RGBA8(12, 14, 18, 255)
 #define COLOR_PANEL RGBA8(21, 24, 31, 255)
@@ -99,6 +100,7 @@ static FILE* g_catalog_log;
 static bool g_quit;
 static bool g_ignore_b;
 static int g_repo_selected;
+static int g_repo_scroll;
 static bool g_network_ready;
 static char g_status[256];
 static char g_manifest_error[256];
@@ -115,6 +117,7 @@ static void draw_confirm(Ui* ui);
 static void add_test_repo(void);
 static void add_repository(void);
 static void repo_cache_path(const char* url, char* out, size_t out_size);
+static void prune_empty_parents(char* path);
 
 static void set_status(const char* format, ...) {
     va_list args;
@@ -214,6 +217,26 @@ static bool directory_nonempty(const char* path) {
     return found;
 }
 
+static bool file_list_has_existing(const HbPackage* package) {
+    char list_path[512];
+    snprintf(list_path, sizeof(list_path), INSTALLED_DIR "/%s.files", package->name);
+    FILE* list = fopen(list_path, "rb");
+    if (!list)
+        return false;
+    char line[1024];
+    bool found = false;
+    while (fgets(line, sizeof(line), list)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "sdmc:/", 6) == 0 && !strstr(line, "..") &&
+            access(line, F_OK) == 0) {
+            found = true;
+            break;
+        }
+    }
+    fclose(list);
+    return found;
+}
+
 static bool is_installed(const HbPackage* package) {
     char path[512];
     const bool has_state =
@@ -226,15 +249,17 @@ static bool is_installed(const HbPackage* package) {
                        file, sizeof(file), NULL, NULL)) {
             if (file[0])
                 return access(file, F_OK) == 0;
+            if (strcmp(package->target, "sdmc:/switch") != 0 &&
+                strcmp(package->target, "sdmc:/") != 0 &&
+                directory_nonempty(package->target))
+                return true;
             if (package->marker[0] && access(package->marker, F_OK) == 0)
                 return true;
         }
     }
-    if (strcmp(package->target, "sdmc:/switch") != 0 &&
-        strcmp(package->target, "sdmc:/") != 0 &&
-        directory_nonempty(package->target))
+    if (package->marker[0] && access(package->marker, F_OK) == 0)
         return true;
-    return package->marker[0] && access(package->marker, F_OK) == 0;
+    return file_list_has_existing(package);
 }
 
 static void format_installed_time(unsigned long long timestamp, char* out, size_t out_size) {
@@ -671,8 +696,11 @@ static void draw_repo_manager(Ui* ui) {
         ui_text(ui, 24, 100, "No repositories.", 20, COLOR_TEXT);
         ui_text(ui, 24, 132, "Press R on the shop screen to add one.", 15, COLOR_MUTED);
     } else {
-        for (int i = 0; i < entries; i++) {
-            const int y = 80 + i * 52;
+        for (int row = 0; row < REPO_VISIBLE_ROWS; row++) {
+            const int i = g_repo_scroll + row;
+            if (i >= entries)
+                break;
+            const int y = 80 + row * 52;
             if (i == g_repo_selected)
                 ui_rect(ui, 24, y - 6, UI_WIDTH - 48, 44, COLOR_CARD_HOVER);
             if (i < g_repos.count) {
@@ -1051,9 +1079,180 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     ui_end(ui);
 }
 
+typedef struct {
+    const HbPackage* package;
+    FILE* list;
+    char temporary[768];
+    char final[768];
+} ExtractCapture;
+
+static void capture_begin(ExtractCapture* capture, const HbPackage* package) {
+    memset(capture, 0, sizeof(*capture));
+    capture->package = package;
+    snprintf(capture->final, sizeof(capture->final), INSTALLED_DIR "/%s.files",
+             package->name);
+    snprintf(capture->temporary, sizeof(capture->temporary), "%.762s.tmp", capture->final);
+    char old[800];
+    snprintf(old, sizeof(old), "%s.old", capture->final);
+    remove(old);
+    rename(capture->final, old);
+    capture->list = fopen(capture->temporary, "wb");
+}
+
+static void capture_add(ExtractCapture* capture, const char* relative) {
+    if (!capture->list || !relative[0])
+        return;
+    char full[1024];
+    const size_t length = strlen(capture->package->target);
+    const bool slash = length && capture->package->target[length - 1] == '/';
+    const int written = snprintf(full, sizeof(full), slash ? "%s%s" : "%s/%s",
+                                 capture->package->target, relative);
+    if (written > 0 && (size_t)written < sizeof(full))
+        fprintf(capture->list, "%s\n", full);
+}
+
+static unsigned int path_hash(const char* path) {
+    unsigned int hash = 2166136261u;
+    while (*path)
+        hash = (hash ^ (unsigned char)*path++) * 16777619u;
+    return hash;
+}
+
+static void remove_stale_files(const char* old_path, const char* new_path) {
+    FILE* new_file = fopen(new_path, "rb");
+    if (!new_file)
+        return;
+    if (fseek(new_file, 0, SEEK_END) != 0) {
+        fclose(new_file);
+        return;
+    }
+    const long size = ftell(new_file);
+    rewind(new_file);
+    if (size <= 0) {
+        fclose(new_file);
+        return;
+    }
+    char* data = malloc((size_t)size + 1);
+    if (!data) {
+        fclose(new_file);
+        return;
+    }
+    const size_t length = fread(data, 1, (size_t)size, new_file);
+    fclose(new_file);
+    data[length] = '\0';
+
+    int lines = 0;
+    for (size_t i = 0; i < length; i++) {
+        if (data[i] == '\n')
+            lines++;
+    }
+    size_t capacity = 16;
+    while (capacity < (size_t)lines * 2 + 1)
+        capacity <<= 1;
+    int* slots = calloc(capacity, sizeof(int));
+    if (!slots) {
+        free(data);
+        return;
+    }
+
+    for (char* line = data; line < data + length; ) {
+        char* end = strchr(line, '\n');
+        if (end)
+            *end = '\0';
+        if (line[0]) {
+            unsigned int slot = path_hash(line) & (unsigned int)(capacity - 1);
+            while (slots[slot])
+                slot = (slot + 1) & (unsigned int)(capacity - 1);
+            slots[slot] = (int)(line - data) + 1;
+        }
+        if (!end)
+            break;
+        line = end + 1;
+    }
+    FILE* old_file = fopen(old_path, "rb");
+    if (!old_file) {
+        free(slots);
+        free(data);
+        return;
+    }
+    char line[1024];
+    while (fgets(line, sizeof(line), old_file)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "sdmc:/", 6) != 0 || strstr(line, "..") ||
+            strcmp(line, "sdmc:/") == 0)
+            continue;
+        unsigned int slot = path_hash(line) & (unsigned int)(capacity - 1);
+        bool found = false;
+        while (slots[slot]) {
+            if (strcmp(data + slots[slot] - 1, line) == 0) {
+                found = true;
+                break;
+            }
+            slot = (slot + 1) & (unsigned int)(capacity - 1);
+        }
+        if (!found) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s", line);
+            remove(path);
+            prune_empty_parents(path);
+        }
+    }
+    fclose(old_file);
+    free(slots);
+    free(data);
+}
+
+static void capture_finish(ExtractCapture* capture) {
+    if (!capture->final[0])
+        return;
+    char old[800];
+    snprintf(old, sizeof(old), "%s.old", capture->final);
+    if (!capture->list) {
+        remove(capture->final);
+        rename(old, capture->final);
+        return;
+    }
+    fclose(capture->list);
+    capture->list = NULL;
+    remove(capture->final);
+    if (rename(capture->temporary, capture->final) != 0) {
+        remove(capture->temporary);
+        rename(old, capture->final);
+        return;
+    }
+    remove_stale_files(old, capture->final);
+    remove(old);
+}
+
+static void capture_cancel(ExtractCapture* capture) {
+    if (!capture->final[0])
+        return;
+    if (capture->list) {
+        fclose(capture->list);
+        capture->list = NULL;
+    }
+    remove(capture->temporary);
+    char old[800];
+    snprintf(old, sizeof(old), "%s.old", capture->final);
+    remove(capture->final);
+    rename(old, capture->final);
+}
+
+static void capture_single(const HbPackage* package, const char* path) {
+    ExtractCapture capture;
+    capture_begin(&capture, package);
+    if (capture.list) {
+        fprintf(capture.list, "%s\n", path);
+        capture_finish(&capture);
+    }
+}
+
 static void extraction_progress(int current, int total, const char* name, void* user) {
-    const HbPackage* package = user;
+    ExtractCapture* capture = user;
+    const HbPackage* package = capture ? capture->package : NULL;
     const char* title = package ? package->title : "";
+    if (capture)
+        capture_add(capture, name);
     const char* base = strrchr(name, '/');
     base = base ? base + 1 : name;
     int stride = total / 50;
@@ -1090,7 +1289,7 @@ static bool name_contains_ci(const char* text, const char* needle) {
 
 static void find_nro_in(const char* directory, const char* package,
                         char* preferred, size_t preferred_size,
-                        char* fallback, size_t fallback_size, int depth) {
+                        char* fallback, size_t fallback_size, int* count, int depth) {
     if (depth > 8)
         return;
     DIR* dir = opendir(directory);
@@ -1109,8 +1308,9 @@ static void find_nro_in(const char* directory, const char* package,
             continue;
         if (S_ISDIR(status.st_mode)) {
             find_nro_in(path, package, preferred, preferred_size,
-                        fallback, fallback_size, depth + 1);
+                        fallback, fallback_size, count, depth + 1);
         } else if (ends_with_ci(path, ".nro")) {
+            (*count)++;
             if (!fallback[0])
                 snprintf(fallback, fallback_size, "%.*s", (int)fallback_size - 1, path);
             if (!preferred[0]) {
@@ -1142,10 +1342,15 @@ static bool shortcut_target(const HbPackage* package, const char* installed_file
 
     char preferred[512] = "";
     char fallback[512] = "";
+    int count = 0;
     find_nro_in(package->target, package->name, preferred, sizeof(preferred),
-                fallback, sizeof(fallback), 0);
-    if (preferred[0] || fallback[0]) {
-        snprintf(out, out_size, "%s", preferred[0] ? preferred : fallback);
+                fallback, sizeof(fallback), &count, 0);
+    if (preferred[0]) {
+        snprintf(out, out_size, "%s", preferred);
+        return true;
+    }
+    if (count == 1 && fallback[0]) {
+        snprintf(out, out_size, "%s", fallback);
         return true;
     }
     return false;
@@ -1252,10 +1457,14 @@ static void install_package(const HbPackage* package, PadState* pad) {
                           asset_name[0] && !ends_with_ci(asset_name, ".zip")
                               ? "Writing application" : "Extracting files", 45);
     char installed_file[512] = "";
+    ExtractCapture capture;
+    memset(&capture, 0, sizeof(capture));
     if (asset_name[0]) {
         if (ends_with_ci(asset_name, ".zip")) {
+            capture_begin(&capture, package);
             if (zip_extract(cache, package->target, "", error, sizeof(error),
-                        extraction_progress, (void*)package) != 0) {
+                        extraction_progress, &capture) != 0) {
+                capture_cancel(&capture);
                 set_status("Extract failed: %s", error);
                 install_redraw();
                 return;
@@ -1269,18 +1478,25 @@ static void install_package(const HbPackage* package, PadState* pad) {
                 install_redraw();
                 return;
             }
+            capture_single(package, installed_file);
         }
-    } else if (zip_extract(cache, package->target, package->strip_prefix, error,
-                        sizeof(error), extraction_progress, (void*)package) != 0) {
-        set_status("Extract failed: %s", error);
-        install_redraw();
-        return;
+    } else {
+        capture_begin(&capture, package);
+        if (zip_extract(cache, package->target, package->strip_prefix, error,
+                        sizeof(error), extraction_progress, &capture) != 0) {
+            capture_cancel(&capture);
+            set_status("Extract failed: %s", error);
+            install_redraw();
+            return;
+        }
     }
     if (!install_complete(package)) {
+        capture_cancel(&capture);
         set_status("Install incomplete: expected file was not written.");
         install_redraw();
         return;
     }
+    capture_finish(&capture);
 
     draw_install_progress(g_ui, package->title, "Finishing", 90);
     char old_version[64];
@@ -1309,12 +1525,35 @@ static void prune_empty_parents(char* path) {
     char* slash = strrchr(path, '/');
     while (slash) {
         *slash = '\0';
-        if (strcmp(path, "sdmc:") == 0 || strcmp(path, "sdmc:/") == 0)
+        if (strcmp(path, "sdmc:") == 0 || strcmp(path, "sdmc:/") == 0 ||
+            strcmp(path, "sdmc:/switch") == 0)
             break;
         if (rmdir(path) != 0)
             break;
         slash = strrchr(path, '/');
     }
+}
+
+static bool remove_file_list(const HbPackage* package) {
+    char list_path[512];
+    snprintf(list_path, sizeof(list_path), INSTALLED_DIR "/%s.files", package->name);
+    FILE* list = fopen(list_path, "rb");
+    if (!list)
+        return false;
+    char line[1024];
+    while (fgets(line, sizeof(line), list)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "sdmc:/", 6) != 0 || strstr(line, "..") ||
+            strcmp(line, "sdmc:/") == 0)
+            continue;
+        char path[1024];
+        snprintf(path, sizeof(path), "%s", line);
+        remove(path);
+        prune_empty_parents(path);
+    }
+    fclose(list);
+    remove(list_path);
+    return true;
 }
 
 static void remove_package(const HbPackage* package) {
@@ -1325,7 +1564,9 @@ static void remove_package(const HbPackage* package) {
                                       installed_hash, sizeof(installed_hash),
                                       installed_file, sizeof(installed_file),
                                       NULL, NULL);
-    if (has_state && installed_file[0]) {
+    if (remove_file_list(package)) {
+        /* All files written by the last install were listed. */
+    } else if (has_state && installed_file[0]) {
         remove(installed_file);
     } else if (strcmp(package->target, "sdmc:/") == 0 && package->marker[0]) {
         char marker[512];
@@ -1433,10 +1674,14 @@ static bool batch_install(const PreparedPackage* prepared) {
                               ? "Writing application" : "Extracting files", 45);
     char installed_file[512] = "";
     char error[256] = {0};
+    ExtractCapture capture;
+    memset(&capture, 0, sizeof(capture));
     if (prepared->asset_name[0]) {
         if (ends_with_ci(prepared->asset_name, ".zip")) {
+            capture_begin(&capture, package);
             if (zip_extract(prepared->cache, package->target, "", error, sizeof(error),
-                        extraction_progress, (void*)package) != 0) {
+                        extraction_progress, &capture) != 0) {
+                capture_cancel(&capture);
                 set_status("Extract failed: %s", error);
                 return false;
             }
@@ -1449,16 +1694,23 @@ static bool batch_install(const PreparedPackage* prepared) {
                 set_status("Could not write %s.", package->title);
                 return false;
             }
+            capture_single(package, installed_file);
         }
-    } else if (zip_extract(prepared->cache, package->target, package->strip_prefix,
-                           error, sizeof(error), extraction_progress, (void*)package) != 0) {
-        set_status("Extract failed: %s", error);
-        return false;
+    } else {
+        capture_begin(&capture, package);
+        if (zip_extract(prepared->cache, package->target, package->strip_prefix,
+                        error, sizeof(error), extraction_progress, &capture) != 0) {
+            capture_cancel(&capture);
+            set_status("Extract failed: %s", error);
+            return false;
+        }
     }
     if (!install_complete(package)) {
+        capture_cancel(&capture);
         set_status("Install incomplete: expected file was not written.");
         return false;
     }
+    capture_finish(&capture);
     draw_install_progress(g_ui, package->title, "Finishing", 90);
     char old_version[64];
     char old_hash[65];
@@ -1566,16 +1818,21 @@ static void draw_context(Ui* ui) {
     const int panel_y = (UI_HEIGHT - panel_h) / 2;
     ui_rect(ui, panel_x, panel_y, panel_w, panel_h, COLOR_PANEL);
     ui_rect(ui, panel_x, panel_y, panel_w, 3, COLOR_ACCENT);
-    ui_text(ui, panel_x + 24, panel_y + 22, "Actions", 22, COLOR_TEXT);
+    const int title_width = ui_text_width(ui, "Actions", 22);
+    ui_text(ui, panel_x + (panel_w - title_width) / 2, panel_y + 22,
+            "Actions", 22, COLOR_TEXT);
     for (int i = 0; i < 4; i++) {
         const int y = panel_y + 72 + i * 48;
         if (i == g_context_selected)
             ui_rect(ui, panel_x + 12, y - 8, panel_w - 24, 40, COLOR_CARD_HOVER);
-        ui_text(ui, panel_x + 28, y, options[i], 17,
+        const int option_width = ui_text_width(ui, options[i], 17);
+        ui_text(ui, panel_x + (panel_w - option_width) / 2, y + 4, options[i], 17,
                 i == g_context_selected ? COLOR_TEXT : COLOR_MUTED);
     }
-    ui_text(ui, panel_x + 24, panel_y + panel_h - 24,
-            "A select   B close", 12, COLOR_MUTED);
+    const char* footer = "A select   B close";
+    const int footer_width = ui_text_width(ui, footer, 12);
+    ui_text(ui, panel_x + (panel_w - footer_width) / 2, panel_y + panel_h - 24,
+            footer, 12, COLOR_MUTED);
     ui_end(ui);
 }
 
@@ -2210,10 +2467,14 @@ int main(void) {
                 draw_shop(&ui);
             } else if (((down & HidNpadButton_Up) || key_up) && g_repo_selected > 0) {
                 g_repo_selected--;
+                if (g_repo_selected < g_repo_scroll)
+                    g_repo_scroll = g_repo_selected;
                 changed = true;
             } else if (((down & HidNpadButton_Down) || key_down) &&
                        g_repo_selected + 1 < repo_entry_count()) {
                 g_repo_selected++;
+                if (g_repo_selected >= g_repo_scroll + REPO_VISIBLE_ROWS)
+                    g_repo_scroll = g_repo_selected - REPO_VISIBLE_ROWS + 1;
                 changed = true;
             } else if ((down & HidNpadButton_A) || key_accept) {
                 request_repo_action();
@@ -2258,6 +2519,7 @@ int main(void) {
         if ((down & HidNpadButton_ZR) || key_manager) {
             g_repo_manager = true;
             g_repo_selected = 0;
+            g_repo_scroll = 0;
             draw_repo_manager(&ui);
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             continue;
