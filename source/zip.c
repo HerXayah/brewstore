@@ -142,8 +142,36 @@ static int detect_root(unzFile archive, char* root, size_t root_size) {
     return root[0] ? 1 : 0;
 }
 
+static int count_extractable(unzFile archive, const char* prefix) {
+    if (unzGoToFirstFile(archive) != UNZ_OK)
+        return -1;
+    const size_t prefix_length = strlen(prefix);
+    int count = 0;
+    for (;;) {
+        char name[ZIP_NAME_MAX];
+        unz_file_info info;
+        if (unzGetCurrentFileInfo(archive, &info, name, sizeof(name), NULL, 0, NULL, 0) != UNZ_OK ||
+            info.size_filename >= sizeof(name))
+            return -1;
+        if (strncmp(name, prefix, prefix_length) != 0)
+            return -1;
+        const char* relative = name + prefix_length;
+        const bool directory = relative[0] && relative[strlen(relative) - 1] == '/';
+        const mode_t type = (mode_t)((info.external_fa >> 16) & S_IFMT);
+        if (!directory && type != S_IFLNK &&
+            strncmp(relative, "__MACOSX/", 9) != 0 && strcmp(relative, "__MACOSX") != 0)
+            count++;
+        const int next = unzGoToNextFile(archive);
+        if (next == UNZ_END_OF_LIST_OF_FILE)
+            break;
+        if (next != UNZ_OK)
+            return -1;
+    }
+    return count;
+}
+
 int zip_extract(const char* archive_path, const char* target, const char* strip_prefix,
-                char* err, size_t err_size) {
+                char* err, size_t err_size, ZipProgress progress, void* user) {
     unzFile archive = unzOpen(archive_path);
     if (!archive) {
         set_error(err, err_size, "cannot open downloaded archive");
@@ -180,6 +208,13 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
         }
     }
     const size_t prefix_length = strlen(prefix);
+    const int extract_total = count_extractable(archive, prefix);
+    if (extract_total < 0) {
+        unzClose(archive);
+        set_error(err, err_size, "cannot count archive entries");
+        return -1;
+    }
+    int extract_done = 0;
 
     if (unzGoToFirstFile(archive) != UNZ_OK) {
         unzClose(archive);
@@ -290,6 +325,9 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
                         return -1;
                     }
                     total += info.uncompressed_size;
+                    extract_done++;
+                    if (progress)
+                        progress(extract_done, extract_total, relative_trimmed, user);
                 }
             }
         }

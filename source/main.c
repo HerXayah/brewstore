@@ -954,7 +954,7 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
         ui_text(ui, UI_WIDTH - 28 - width, 22, batch, 15, COLOR_ACCENT);
     }
     ui_text_truncated(ui, 28, 96, title, 20, COLOR_TEXT, UI_WIDTH - 56);
-    ui_text(ui, 28, 132, step, 16, COLOR_MUTED);
+    ui_text_truncated(ui, 28, 132, step, 16, COLOR_MUTED, UI_WIDTH - 56);
 
     const int bar_x = 28;
     const int bar_y = 340;
@@ -975,6 +975,19 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     snprintf(line, sizeof(line), "%d%%", percent);
     ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
     ui_end(ui);
+}
+
+static void extraction_progress(int current, int total, const char* name, void* user) {
+    const HbPackage* package = user;
+    const char* title = package ? package->title : "";
+    const char* base = strrchr(name, '/');
+    base = base ? base + 1 : name;
+    char step[320];
+    snprintf(step, sizeof(step), "%d / %d  %s", current, total, base);
+    int percent = total > 0 ? 45 + current * 45 / total : 45;
+    if (percent > 89)
+        percent = 89;
+    draw_install_progress(g_ui, title, step, percent);
 }
 
 static void install_redraw(void) {
@@ -1065,7 +1078,8 @@ static void install_package(const HbPackage* package, PadState* pad) {
     char installed_file[512] = "";
     if (asset_name[0]) {
         if (ends_with_ci(asset_name, ".zip")) {
-            if (zip_extract(cache, package->target, "", error, sizeof(error)) != 0) {
+            if (zip_extract(cache, package->target, "", error, sizeof(error),
+                        extraction_progress, (void*)package) != 0) {
                 set_status("Extract failed: %s", error);
                 install_redraw();
                 return;
@@ -1079,7 +1093,8 @@ static void install_package(const HbPackage* package, PadState* pad) {
                 return;
             }
         }
-    } else if (zip_extract(cache, package->target, package->strip_prefix, error, sizeof(error)) != 0) {
+    } else if (zip_extract(cache, package->target, package->strip_prefix, error,
+                        sizeof(error), extraction_progress, (void*)package) != 0) {
         set_status("Extract failed: %s", error);
         install_redraw();
         return;
@@ -1209,7 +1224,8 @@ static bool batch_install(const PreparedPackage* prepared) {
     char error[256] = {0};
     if (prepared->asset_name[0]) {
         if (ends_with_ci(prepared->asset_name, ".zip")) {
-            if (zip_extract(prepared->cache, package->target, "", error, sizeof(error)) != 0) {
+            if (zip_extract(prepared->cache, package->target, "", error, sizeof(error),
+                        extraction_progress, (void*)package) != 0) {
                 set_status("Extract failed: %s", error);
                 return false;
             }
@@ -1222,7 +1238,7 @@ static bool batch_install(const PreparedPackage* prepared) {
             }
         }
     } else if (zip_extract(prepared->cache, package->target, package->strip_prefix,
-                           error, sizeof(error)) != 0) {
+                           error, sizeof(error), extraction_progress, (void*)package) != 0) {
         set_status("Extract failed: %s", error);
         return false;
     }
