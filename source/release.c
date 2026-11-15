@@ -130,7 +130,7 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
         return fail(err, err_size, "not a GitHub repository URL");
 
     char api[1024];
-    snprintf(api, sizeof(api), "https://api.github.com/repos/%s/%s/releases/latest",
+    snprintf(api, sizeof(api), "https://api.github.com/repos/%s/%s/releases?per_page=10",
              owner, repo);
     char hash[65];
     if (http_download(api, cache_path, hash, err, err_size) != 0)
@@ -149,40 +149,53 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
     jsmn_parser parser;
     jsmn_init(&parser);
     const int count = jsmn_parse(&parser, json, length, tokens, RELEASE_TOKENS);
-    if (count < 1 || tokens[0].type != JSMN_OBJECT) {
+    if (count < 1 || (tokens[0].type != JSMN_OBJECT && tokens[0].type != JSMN_ARRAY)) {
         free(tokens);
         free(json);
         return fail(err, err_size, "GitHub release response is not JSON");
     }
 
-    const int assets = array_get(json, tokens, count, 0, "assets");
-    if (assets < 0) {
-        free(tokens);
-        free(json);
-        return fail(err, err_size, "release has no assets");
-    }
-
     char fallback_url[1024] = "";
     char fallback_name[128] = "";
     unsigned long long fallback_size = 0;
-    int position = assets + 1;
-    for (int index = 0; index < tokens[assets].size; index++) {
-        const int object = position;
-        position = token_skip(tokens, object, count);
-        if (object >= count || tokens[object].type != JSMN_OBJECT)
+    const int releases = tokens[0].type == JSMN_ARRAY ? tokens[0].size : 1;
+    int release_position = tokens[0].type == JSMN_ARRAY ? 1 : 0;
+    for (int release = 0; release < releases; release++) {
+        const int release_object = release_position;
+        release_position = token_skip(tokens, release_object, count);
+        if (release_object >= count || tokens[release_object].type != JSMN_OBJECT)
             continue;
-        char name[128];
-        char url[1024];
-        char size_text[32] = "0";
-        if (object_get(json, tokens, count, object, "name", name, sizeof(name)) != 0 ||
-            object_get(json, tokens, count, object, "browser_download_url", url, sizeof(url)) != 0)
+        const int assets = array_get(json, tokens, count, release_object, "assets");
+        if (assets < 0)
             continue;
-        object_get(json, tokens, count, object, "size", size_text, sizeof(size_text));
-        const unsigned long long size = strtoull(size_text, NULL, 10);
-        if (!safe_asset_name(name) || strncmp(url, "https://", 8) != 0)
-            continue;
-        if (asset_hint && asset_hint[0]) {
-            if (ends_with_ci(name, asset_hint)) {
+
+        int position = assets + 1;
+        for (int index = 0; index < tokens[assets].size; index++) {
+            const int object = position;
+            position = token_skip(tokens, object, count);
+            if (object >= count || tokens[object].type != JSMN_OBJECT)
+                continue;
+            char name[128];
+            char url[1024];
+            char size_text[32] = "0";
+            if (object_get(json, tokens, count, object, "name", name, sizeof(name)) != 0 ||
+                object_get(json, tokens, count, object, "browser_download_url", url, sizeof(url)) != 0)
+                continue;
+            object_get(json, tokens, count, object, "size", size_text, sizeof(size_text));
+            const unsigned long long size = strtoull(size_text, NULL, 10);
+            if (!safe_asset_name(name) || strncmp(url, "https://", 8) != 0)
+                continue;
+            if (asset_hint && asset_hint[0]) {
+                if (ends_with_ci(name, asset_hint)) {
+                    snprintf(asset_url, url_size, "%s", url);
+                    snprintf(asset_name, name_size, "%s", name);
+                    if (asset_size)
+                        *asset_size = size;
+                    free(tokens);
+                    free(json);
+                    return 0;
+                }
+            } else if (ends_with_ci(name, ".nro")) {
                 snprintf(asset_url, url_size, "%s", url);
                 snprintf(asset_name, name_size, "%s", name);
                 if (asset_size)
@@ -190,19 +203,11 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
                 free(tokens);
                 free(json);
                 return 0;
+            } else if (!fallback_name[0] && ends_with_ci(name, ".zip")) {
+                snprintf(fallback_url, sizeof(fallback_url), "%s", url);
+                snprintf(fallback_name, sizeof(fallback_name), "%s", name);
+                fallback_size = size;
             }
-        } else if (ends_with_ci(name, ".nro")) {
-            snprintf(asset_url, url_size, "%s", url);
-            snprintf(asset_name, name_size, "%s", name);
-            if (asset_size)
-                *asset_size = size;
-            free(tokens);
-            free(json);
-            return 0;
-        } else if (!fallback_name[0] && ends_with_ci(name, ".zip")) {
-            snprintf(fallback_url, sizeof(fallback_url), "%s", url);
-            snprintf(fallback_name, sizeof(fallback_name), "%s", name);
-            fallback_size = size;
         }
     }
 
