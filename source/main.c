@@ -11,6 +11,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "github.h"
@@ -61,8 +62,11 @@ static RepoList g_repos;
 static int g_selected;
 enum { FILTER_ALL = 0, FILTER_UPDATES, FILTER_INSTALLED, FILTER_NOT_INSTALLED };
 static int g_filter;
-enum { SORT_DEFAULT = 0, SORT_NAME, SORT_AUTHOR };
+static char g_marked[HBPKG_MAX_PACKAGES][64];
+static int g_marked_count;
+enum { SORT_NAME = 0, SORT_AUTHOR, SORT_INSTALLED, SORT_UPDATED };
 static int g_sort;
+static bool g_sort_reverse;
 static bool g_context_menu;
 static int g_context_selected;
 static PadState* g_pad;
@@ -124,7 +128,8 @@ static void trim_newline(char* text) {
 }
 
 static void write_state(const HbPackage* package, const char* hash,
-                        const char* installed_file) {
+                        const char* installed_file, unsigned long long installed_at,
+                        unsigned long long updated_at) {
     char path[512];
     if (state_path(package, path, sizeof(path)) != 0)
         return;
@@ -134,12 +139,14 @@ static void write_state(const HbPackage* package, const char* hash,
     fprintf(file, "%s\nsha256=%s\n", package->version, hash ? hash : "");
     if (installed_file && installed_file[0])
         fprintf(file, "file=%s\n", installed_file);
+    fprintf(file, "installed=%llu\nupdated=%llu\n", installed_at, updated_at);
     fclose(file);
 }
 
 static bool read_state(const HbPackage* package, char* version, size_t version_size,
                        char* hash, size_t hash_size, char* installed_file,
-                       size_t installed_file_size) {
+                       size_t installed_file_size, unsigned long long* installed_at,
+                       unsigned long long* updated_at) {
     char path[512];
     if (state_path(package, path, sizeof(path)) != 0)
         return false;
@@ -150,6 +157,10 @@ static bool read_state(const HbPackage* package, char* version, size_t version_s
     hash[0] = '\0';
     if (installed_file && installed_file_size)
         installed_file[0] = '\0';
+    if (installed_at)
+        *installed_at = 0;
+    if (updated_at)
+        *updated_at = 0;
     if (!fgets(version, (int)version_size, file)) {
         fclose(file);
         return false;
@@ -173,9 +184,23 @@ static bool read_state(const HbPackage* package, char* version, size_t version_s
             }
             strcpy(installed_file, line + 5);
         }
+        if (strncmp(line, "installed=", 10) == 0 && installed_at)
+            *installed_at = strtoull(line + 10, NULL, 10);
+        if (strncmp(line, "updated=", 8) == 0 && updated_at)
+            *updated_at = strtoull(line + 8, NULL, 10);
     }
     fclose(file);
     return true;
+}
+
+static void format_installed_time(unsigned long long timestamp, char* out, size_t out_size) {
+    out[0] = '\0';
+    if (!timestamp)
+        return;
+    const time_t value = (time_t)timestamp;
+    struct tm parts;
+    if (localtime_r(&value, &parts))
+        strftime(out, out_size, "%Y-%m-%d %H:%M", &parts);
 }
 
 static bool update_available(const HbPackage* package) {
@@ -184,7 +209,7 @@ static bool update_available(const HbPackage* package) {
     char installed_version[64];
     char installed_hash[65];
     if (!read_state(package, installed_version, sizeof(installed_version),
-                    installed_hash, sizeof(installed_hash), NULL, 0))
+                    installed_hash, sizeof(installed_hash), NULL, 0, NULL, NULL))
         return false;
     if (version_is_newer(package->version, installed_version))
         return true;
@@ -212,6 +237,31 @@ static bool filter_matches(const HbPackage* package) {
     }
 }
 
+static bool is_marked(const HbPackage* package) {
+    for (int i = 0; i < g_marked_count; i++) {
+        if (strcmp(g_marked[i], package->name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void toggle_mark(const HbPackage* package) {
+    for (int i = 0; i < g_marked_count; i++) {
+        if (strcmp(g_marked[i], package->name) == 0) {
+            memmove(&g_marked[i], &g_marked[i + 1],
+                    sizeof(g_marked[0]) * (size_t)(g_marked_count - i - 1));
+            g_marked_count--;
+            return;
+        }
+    }
+    if (g_marked_count < HBPKG_MAX_PACKAGES)
+        snprintf(g_marked[g_marked_count++], sizeof(g_marked[0]), "%s", package->name);
+}
+
+static void clear_marks(void) {
+    g_marked_count = 0;
+}
+
 static int visible_count(void) {
     int count = 0;
     for (int i = 0; i < g_manifest.count; i++) {
@@ -221,14 +271,35 @@ static int visible_count(void) {
     return count;
 }
 
+static unsigned long long package_timestamp(const HbPackage* package, bool installed) {
+    char version[64];
+    char hash[65];
+    char file[512];
+    unsigned long long installed_at = 0;
+    unsigned long long updated_at = 0;
+    if (!read_state(package, version, sizeof(version), hash, sizeof(hash),
+                    file, sizeof(file), &installed_at, &updated_at))
+        return 0;
+    return installed ? installed_at : updated_at;
+}
+
 static int compare_packages(const void* left, const void* right) {
     const HbPackage* a = *(const HbPackage* const*)left;
     const HbPackage* b = *(const HbPackage* const*)right;
-    if (g_sort == SORT_NAME)
-        return strcasecmp(a->title, b->title);
-    if (g_sort == SORT_AUTHOR)
-        return strcasecmp(a->author, b->author);
-    return 0;
+    int result = 0;
+    if (g_sort == SORT_NAME) {
+        result = strcasecmp(a->title, b->title);
+    } else if (g_sort == SORT_AUTHOR) {
+        result = strcasecmp(a->author, b->author);
+    } else {
+        const unsigned long long a_time = package_timestamp(a, g_sort == SORT_INSTALLED);
+        const unsigned long long b_time = package_timestamp(b, g_sort == SORT_INSTALLED);
+        if (a_time != b_time)
+            result = a_time > b_time ? 1 : -1;
+    }
+    if (result == 0)
+        result = strcasecmp(a->title, b->title);
+    return g_sort_reverse ? -result : result;
 }
 
 static HbPackage* visible_package(int index) {
@@ -238,17 +309,18 @@ static HbPackage* visible_package(int index) {
         if (filter_matches(&g_manifest.items[i]))
             matches[count++] = &g_manifest.items[i];
     }
-    if (g_sort != SORT_DEFAULT)
-        qsort(matches, (size_t)count, sizeof(matches[0]), compare_packages);
+    qsort(matches, (size_t)count, sizeof(matches[0]), compare_packages);
     return index >= 0 && index < count ? matches[index] : NULL;
 }
 
 static const char* sort_name(void) {
-    switch (g_sort) {
-        case SORT_NAME: return "Name";
-        case SORT_AUTHOR: return "Author";
-        default: return "Default";
-    }
+    if (g_sort == SORT_NAME)
+        return g_sort_reverse ? "Name Z-A" : "Name A-Z";
+    if (g_sort == SORT_AUTHOR)
+        return g_sort_reverse ? "Author Z-A" : "Author A-Z";
+    if (g_sort == SORT_INSTALLED)
+        return g_sort_reverse ? "Installed newest" : "Installed oldest";
+    return g_sort_reverse ? "Updated newest" : "Updated oldest";
 }
 
 static void clamp_selection(void) {
@@ -336,7 +408,8 @@ static void draw_loading(Ui* ui, const char* message) {
     ui_end(ui);
 }
 
-static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selected) {
+static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selected,
+                      bool marked) {
     const int width = 276;
     const int height = 232;
     if (selected) {
@@ -344,6 +417,11 @@ static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selec
         ui_rect(ui, x, y, width, height, COLOR_CARD_HOVER);
     } else {
         ui_rect(ui, x, y, width, height, COLOR_CARD);
+    }
+
+    if (marked) {
+        ui_rect(ui, x + width - 30, y + 10, 20, 20, COLOR_ACCENT);
+        ui_text(ui, x + width - 25, y + 11, "*", 16, COLOR_BACKGROUND);
     }
 
     const int icon_size = 96;
@@ -456,7 +534,7 @@ static void draw_shop_content(Ui* ui) {
             const int column = slot % VISIBLE_COLUMNS;
             const int row = slot / VISIBLE_COLUMNS;
             draw_card(ui, package, 32 + column * 292,
-                      76 + row * 248, index == g_selected);
+                      76 + row * 248, index == g_selected, is_marked(package));
         }
 
         ui_rect(ui, 936, 76, 312, 568, COLOR_PANEL);
@@ -469,8 +547,8 @@ static void draw_shop_content(Ui* ui) {
                     update ? COLOR_ACCENT : COLOR_GREEN);
         }
 
-        ui_markdown_wrap(ui, 958, 196, selected->description, 15, COLOR_TEXT,
-                         268, 8, 21);
+        ui_markdown_wrap(ui, 958, 236, selected->description, 15, COLOR_TEXT,
+                         268, 7, 21);
 
         ui_text_truncated(ui, 958, 522, selected->target, 12, COLOR_MUTED, 268);
         const int button_y = 556;
@@ -487,10 +565,10 @@ static void draw_shop_content(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0]) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-        ui_text(ui, 24, 696, "A install   X menu   Y filter   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 696, "A install   L select   X menu   Y filter   ZR repos   ZL settings   B exit",
                 12, COLOR_MUTED);
     } else {
-        ui_text(ui, 24, 682, "A install   X menu   Y filter   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 682, "A install   L select   X menu   Y filter   ZR repos   ZL settings   B exit",
                 13, COLOR_MUTED);
     }
 
@@ -966,7 +1044,18 @@ static void install_package(const HbPackage* package, PadState* pad) {
     }
 
     draw_install_progress(g_ui, package->title, "Finishing", 90);
-    write_state(package, hash, installed_file);
+    char old_version[64];
+    char old_hash[65];
+    char old_file[512];
+    unsigned long long installed_at = 0;
+    unsigned long long updated_at = 0;
+    read_state(package, old_version, sizeof(old_version), old_hash, sizeof(old_hash),
+               old_file, sizeof(old_file), &installed_at, &updated_at);
+    const unsigned long long now = (unsigned long long)time(NULL);
+    if (!installed_at)
+        installed_at = now;
+    updated_at = now;
+    write_state(package, hash, installed_file, installed_at, updated_at);
     if (strcmp(package->version, "latest") == 0 ||
         strcmp(package->version, "test") == 0 ||
         strcmp(package->version, "unknown") == 0)
@@ -982,7 +1071,8 @@ static void remove_package(const HbPackage* package) {
     char installed_file[512];
     const bool has_state = read_state(package, installed_version, sizeof(installed_version),
                                       installed_hash, sizeof(installed_hash),
-                                      installed_file, sizeof(installed_file));
+                                      installed_file, sizeof(installed_file),
+                                      NULL, NULL);
     if (has_state && installed_file[0]) {
         remove(installed_file);
     } else if (strcmp(package->target, "sdmc:/switch") == 0) {
@@ -998,6 +1088,40 @@ static void remove_package(const HbPackage* package) {
     if (state_path(package, path, sizeof(path)) == 0)
         remove(path);
     set_status("Removed %s.", package->title);
+    draw_shop(g_ui);
+}
+
+static void install_selected_or_current(HbPackage* current, PadState* pad) {
+    if (!g_marked_count) {
+        install_package(current, pad);
+        return;
+    }
+    for (int i = 0; i < g_manifest.count && !g_quit; i++) {
+        if (is_marked(&g_manifest.items[i]))
+            install_package(&g_manifest.items[i], pad);
+    }
+    clear_marks();
+    clamp_selection();
+    draw_shop(g_ui);
+}
+
+static void remove_selected_or_current(HbPackage* current) {
+    if (!g_marked_count) {
+        if (is_installed(current)) {
+            remove_package(current);
+            clamp_selection();
+        } else {
+            set_status("%s is not installed.", current->title);
+            draw_shop(g_ui);
+        }
+        return;
+    }
+    for (int i = 0; i < g_manifest.count; i++) {
+        if (is_marked(&g_manifest.items[i]) && is_installed(&g_manifest.items[i]))
+            remove_package(&g_manifest.items[i]);
+    }
+    clear_marks();
+    clamp_selection();
     draw_shop(g_ui);
 }
 
@@ -1040,17 +1164,11 @@ static void context_action(void) {
     switch (g_context_selected) {
         case 0:
             g_context_menu = false;
-            install_package(package, g_pad);
+            install_selected_or_current(package, g_pad);
             return;
         case 1:
             g_context_menu = false;
-            if (is_installed(package)) {
-                remove_package(package);
-                clamp_selection();
-            } else {
-                set_status("%s is not installed.", package->title);
-                draw_shop(g_ui);
-            }
+            remove_selected_or_current(package);
             return;
         case 2:
             g_context_menu = false;
@@ -1058,7 +1176,12 @@ static void context_action(void) {
             draw_shop(g_ui);
             return;
         case 3:
-            g_sort = (g_sort + 1) % 3;
+            if (g_sort_reverse) {
+                g_sort_reverse = false;
+                g_sort = (g_sort + 1) % 4;
+            } else {
+                g_sort_reverse = true;
+            }
             g_selected = 0;
             g_scroll_page = 0;
             clamp_selection();
@@ -1741,6 +1864,12 @@ int main(void) {
         } else if ((down & HidNpadButton_R) || key_add) {
             add_repository();
             changed = true;
+        } else if ((down & HidNpadButton_L) || key_test) {
+            HbPackage* package = visible_package(g_selected);
+            if (package) {
+                toggle_mark(package);
+                changed = true;
+            }
         } else if ((down & HidNpadButton_Y) || key_remove) {
             g_filter = (g_filter + 1) % 4;
             g_selected = 0;
@@ -1750,7 +1879,7 @@ int main(void) {
         } else if (visible_count() && ((down & HidNpadButton_A) || key_accept)) {
             HbPackage* package = visible_package(g_selected);
             if (package) {
-                install_package(package, &pad);
+                install_selected_or_current(package, &pad);
                 changed = true;
             }
         }
