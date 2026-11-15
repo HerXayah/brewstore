@@ -226,7 +226,7 @@ static int normalize_target(char* target, size_t target_size) {
 
 static int valid_target(const char* target) {
     static const char prefix[] = "sdmc:/switch/";
-    if (strcmp(target, "sdmc:/switch") == 0)
+    if (strcmp(target, "sdmc:/") == 0 || strcmp(target, "sdmc:/switch") == 0)
         return 1;
     if (strncmp(target, prefix, sizeof(prefix) - 1) != 0)
         return 0;
@@ -441,8 +441,17 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
             free(text);
             return fail(err, err_size, "install target is too long");
         }
-        while (strlen(pkg->target) > 1 && pkg->target[strlen(pkg->target) - 1] == '/')
-            pkg->target[strlen(pkg->target) - 1] = '\0';
+        if (strcmp(pkg->target, "sdmc:/") != 0)
+            while (strlen(pkg->target) > 1 && pkg->target[strlen(pkg->target) - 1] == '/')
+                pkg->target[strlen(pkg->target) - 1] = '\0';
+        object_get(text, tokens, count, object, "marker", pkg->marker, sizeof(pkg->marker));
+        if (pkg->marker[0] &&
+            (strncmp(pkg->marker, "sdmc:/switch/", 13) != 0 ||
+             strstr(pkg->marker, "..") || strchr(pkg->marker, '\\'))) {
+            free(tokens);
+            free(text);
+            return fail(err, err_size, "marker must be under sdmc:/switch/");
+        }
         if (!valid_target(pkg->target)) {
             free(tokens);
             free(text);

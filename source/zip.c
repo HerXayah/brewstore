@@ -14,7 +14,7 @@
 #define ZIP_MAX_FILE (1024ull * 1024ull * 1024ull)
 #define ZIP_MAX_TOTAL (1024ull * 1024ull * 1024ull)
 #define ZIP_NAME_MAX 1024
-#define ZIP_READ_SIZE 32768
+#define ZIP_READ_SIZE (128 * 1024)
 
 static void set_error(char* err, size_t err_size, const char* message) {
     if (err && err_size)
@@ -259,7 +259,10 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
                 return -1;
             }
             char full[1024];
-            const int written = snprintf(full, sizeof(full), "%s/%s", target, relative_trimmed);
+            const size_t target_length = strlen(target);
+            const bool target_slash = target_length && target[target_length - 1] == '/';
+            const int written = snprintf(full, sizeof(full), target_slash ? "%s%s" : "%s/%s",
+                                         target, relative_trimmed);
             if (written <= 0 || (size_t)written >= sizeof(full)) {
                 unzClose(archive);
                 set_error(err, err_size, "archive path is too long");
@@ -299,13 +302,15 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
                         return -1;
                     }
                     FILE* file = fopen(full, "wb");
+                    if (file)
+                        setvbuf(file, NULL, _IOFBF, 64 * 1024);
                     if (!file) {
                         unzCloseCurrentFile(archive);
                         unzClose(archive);
                         set_error(err, err_size, "cannot create target file");
                         return -1;
                     }
-                    unsigned char buffer[ZIP_READ_SIZE];
+                    static unsigned char buffer[ZIP_READ_SIZE];
                     int read;
                     int failed = 0;
                     while ((read = unzReadCurrentFile(archive, buffer, sizeof(buffer))) > 0) {

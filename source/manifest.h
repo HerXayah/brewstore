@@ -22,6 +22,7 @@ typedef struct {
     char branch[64];
     char strip_prefix[128];
     char target[256];
+    char marker[512];
     char sha256[65];
     bool target_explicit;
     bool readme_fallback;

@@ -125,7 +125,9 @@ static int state_path(const HbPackage* package, char* out, size_t out_size) {
 
 static bool is_installed(const HbPackage* package) {
     char path[512];
-    return state_path(package, path, sizeof(path)) == 0 && access(path, F_OK) == 0;
+    if (state_path(package, path, sizeof(path)) == 0 && access(path, F_OK) == 0)
+        return true;
+    return package->marker[0] && access(package->marker, F_OK) == 0;
 }
 
 static void trim_newline(char* text) {
@@ -982,6 +984,11 @@ static void extraction_progress(int current, int total, const char* name, void* 
     const char* title = package ? package->title : "";
     const char* base = strrchr(name, '/');
     base = base ? base + 1 : name;
+    int stride = total / 50;
+    if (stride < 1)
+        stride = 1;
+    if (current != total && current % stride != 0)
+        return;
     char step[320];
     snprintf(step, sizeof(step), "%d / %d  %s", current, total, base);
     int percent = total > 0 ? 45 + current * 45 / total : 45;
@@ -1058,8 +1065,14 @@ static void install_package(const HbPackage* package, PadState* pad) {
         return;
     }
 
-    const bool root_target = strcmp(package->target, "sdmc:/switch") == 0;
-    if (root_target && (!asset_name[0] || ends_with_ci(asset_name, ".zip"))) {
+    if (strcmp(package->target, "sdmc:/") == 0 &&
+        (!asset_name[0] || !ends_with_ci(asset_name, ".zip"))) {
+        set_status("The SD card root target only accepts a zip archive.");
+        install_redraw();
+        return;
+    }
+    if (strcmp(package->target, "sdmc:/switch") == 0 &&
+        (!asset_name[0] || ends_with_ci(asset_name, ".zip"))) {
         set_status("sdmc:/switch only accepts a single non-zip asset.");
         install_redraw();
         return;
@@ -1085,7 +1098,8 @@ static void install_package(const HbPackage* package, PadState* pad) {
                 return;
             }
         } else {
-            snprintf(installed_file, sizeof(installed_file), "%s/%s",
+            snprintf(installed_file, sizeof(installed_file),
+                     package->target[strlen(package->target) - 1] == '/' ? "%s%s" : "%s/%s",
                      package->target, asset_name);
             if (path_copy_file(cache, installed_file) != 0) {
                 set_status("Could not write the release asset.");
@@ -1132,8 +1146,9 @@ static void remove_package(const HbPackage* package) {
                                       NULL, NULL);
     if (has_state && installed_file[0]) {
         remove(installed_file);
-    } else if (strcmp(package->target, "sdmc:/switch") == 0) {
-        set_status("Refusing to delete /switch itself.");
+    } else if (strcmp(package->target, "sdmc:/switch") == 0 ||
+               strcmp(package->target, "sdmc:/") == 0) {
+        set_status("Refusing to delete the SD card root or /switch itself.");
         draw_shop(g_ui);
         return;
     } else if (path_remove_tree(package->target) != 0) {
@@ -1205,9 +1220,13 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
 
 static bool batch_install(const PreparedPackage* prepared) {
     HbPackage* package = prepared->package;
-    const bool root_target = strcmp(package->target, "sdmc:/switch") == 0;
-    if (root_target && (!prepared->asset_name[0] ||
-                        ends_with_ci(prepared->asset_name, ".zip"))) {
+    if (strcmp(package->target, "sdmc:/") == 0 &&
+        (!prepared->asset_name[0] || !ends_with_ci(prepared->asset_name, ".zip"))) {
+        set_status("The SD card root target only accepts a zip archive.");
+        return false;
+    }
+    if (strcmp(package->target, "sdmc:/switch") == 0 &&
+        (!prepared->asset_name[0] || ends_with_ci(prepared->asset_name, ".zip"))) {
         set_status("sdmc:/switch needs a single non-zip asset.");
         return false;
     }
@@ -1230,7 +1249,9 @@ static bool batch_install(const PreparedPackage* prepared) {
                 return false;
             }
         } else {
-            snprintf(installed_file, sizeof(installed_file), "%.255s/%.127s",
+            snprintf(installed_file, sizeof(installed_file),
+                     package->target[strlen(package->target) - 1] == '/' ? "%.255s%.127s"
+                                                                        : "%.255s/%.127s",
                      package->target, prepared->asset_name);
             if (path_copy_file(prepared->cache, installed_file) != 0) {
                 set_status("Could not write %s.", package->title);
