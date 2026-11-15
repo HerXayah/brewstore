@@ -22,7 +22,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define HTTP_MAX_BODY (256ull * 1024ull * 1024ull)
+#define HTTP_MAX_BODY (1024ull * 1024ull * 1024ull)
 #define HTTP_MAX_HEADER 16384
 #define HTTP_MAX_REDIRECTS 4
 #define HTTP_CONNECT_TIMEOUT_MS 15000

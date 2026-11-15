@@ -11,8 +11,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define ZIP_MAX_FILE (64ull * 1024ull * 1024ull)
-#define ZIP_MAX_TOTAL (256ull * 1024ull * 1024ull)
+#define ZIP_MAX_FILE (1024ull * 1024ull * 1024ull)
+#define ZIP_MAX_TOTAL (1024ull * 1024ull * 1024ull)
 #define ZIP_NAME_MAX 1024
 #define ZIP_READ_SIZE 32768
 

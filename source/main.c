@@ -72,6 +72,7 @@ enum {
 };
 static int g_confirm_action;
 static int g_confirm_index;
+static bool g_confirm_yes;
 static AppSettings g_settings;
 static FILE* g_catalog_log;
 static bool g_quit;
@@ -238,6 +239,27 @@ static const CachedIcon* icon_for(const HbPackage* package) {
     return cache_icon(package, pixels, width, height);
 }
 
+static const char* display_version(const HbPackage* package) {
+    if (strcmp(package->version, "latest") == 0 ||
+        strcmp(package->version, "test") == 0 ||
+        strcmp(package->version, "unknown") == 0)
+        return "Latest release";
+    return package->version;
+}
+
+static void draw_loading(Ui* ui, const char* message) {
+    if (!ui)
+        return;
+    ui_begin(ui);
+    ui_clear(ui, COLOR_BACKGROUND);
+    ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
+    ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
+    ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
+            "Codename YukinaMinato", 9, COLOR_MUTED);
+    ui_text(ui, 24, 300, message, 18, COLOR_MUTED);
+    ui_end(ui);
+}
+
 static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selected) {
     const int width = 276;
     const int height = 232;
@@ -265,17 +287,21 @@ static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selec
 
     ui_text_truncated(ui, x + 14, y + 130, package->title, 19, COLOR_TEXT, width - 28);
     ui_text_truncated(ui, x + 14, y + 157, package->author, 13, COLOR_MUTED, width - 28);
+    ui_text_truncated(ui, x + 14, y + 181, display_version(package), 12, COLOR_MUTED,
+                      width - 28);
 
     if (is_installed(package)) {
         const bool update = update_available(package);
         const char* label = update ? "Update" : "Installed";
         const int label_width = ui_text_width(ui, label, 13);
-        ui_text(ui, x + width - 14 - label_width, y + 190, label, 13,
+        ui_text(ui, x + width - 14 - label_width, y + 204, label, 13,
                 update ? COLOR_ACCENT : COLOR_GREEN);
     }
 }
 
 static bool readme_for(HbPackage* package) {
+    if (!package->readme_fallback)
+        return package->description[0] != '\0';
     const bool placeholder = strstr(package->description, "added for testing.") != NULL;
     if (package->description[0] && !placeholder)
         return true;
@@ -449,11 +475,11 @@ static void draw_confirm(Ui* ui) {
         ui_text_truncated(ui, 24, 158, g_repos.urls[g_confirm_index], 14,
                           COLOR_MUTED, UI_WIDTH - 48);
 
-    ui_rect(ui, 24, 260, 180, 46, COLOR_ACCENT);
-    ui_text(ui, 90, 273, "A  Yes", 17, COLOR_TEXT);
-    ui_rect(ui, 220, 260, 180, 46, COLOR_CARD);
-    ui_text(ui, 292, 273, "B  No", 17, COLOR_TEXT);
-    ui_text(ui, 24, 696, "A yes   B no", 13, COLOR_MUTED);
+    ui_rect(ui, 24, 260, 180, 46, g_confirm_yes ? COLOR_ACCENT : COLOR_CARD);
+    ui_text(ui, 90, 273, "Yes", 17, g_confirm_yes ? COLOR_TEXT : COLOR_MUTED);
+    ui_rect(ui, 220, 260, 180, 46, g_confirm_yes ? COLOR_CARD : COLOR_ACCENT);
+    ui_text(ui, 292, 273, "No", 17, g_confirm_yes ? COLOR_MUTED : COLOR_TEXT);
+    ui_text(ui, 24, 696, "Left/Right select   A confirm   B cancel", 13, COLOR_MUTED);
     ui_end(ui);
 }
 
@@ -461,6 +487,7 @@ static void request_repo_action(void) {
     if (g_repo_selected >= repo_entry_count())
         return;
     g_confirm_index = g_repo_selected;
+    g_confirm_yes = false;
     if (g_repo_selected >= g_repos.count)
         g_confirm_action = CONFIRM_REMOVE_TEST;
     else
@@ -471,6 +498,7 @@ static void request_repo_action(void) {
 
 static void request_log_delete(void) {
     g_confirm_action = CONFIRM_DELETE_LOG;
+    g_confirm_yes = false;
     draw_confirm(g_ui);
 }
 
@@ -990,6 +1018,7 @@ static void refresh_catalogs(bool fetch) {
         if (manifest_load(TEST_REPO_PATH, &test, error, sizeof(error)) == 0) {
             for (int i = 0; i < test.count; i++) {
                 test.items[i].target_explicit = false;
+                test.items[i].readme_fallback = true;
                 if (strcmp(test.items[i].version, "test") == 0)
                     snprintf(test.items[i].version, sizeof(test.items[i].version), "latest");
                 if (strcmp(test.items[i].author, "Git") == 0 ||
@@ -1019,6 +1048,9 @@ static void refresh_catalogs(bool fetch) {
             char download_error[128];
             if (http_download(g_repos.urls[i], cache, hash, download_error,
                               sizeof(download_error)) != 0) {
+                if (g_catalog_log)
+                    fprintf(g_catalog_log, "FAIL repo %s: %s\n",
+                            g_repos.urls[i], download_error);
                 failures++;
                 if (!present)
                     continue;
@@ -1290,6 +1322,7 @@ int main(void) {
     if (ui_init(&ui, error, sizeof(error)) != 0)
         return 1;
     g_ui = &ui;
+    draw_loading(&ui, "Starting...");
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
@@ -1319,9 +1352,12 @@ int main(void) {
     http_set_proxy_prefix(g_settings.download_proxy);
 
     hidInitializeKeyboard();
+    draw_loading(&ui, "Updating catalogs...");
     refresh_catalogs(false);
-    if (!g_manifest.count && g_repos.count > 0)
+    if (!g_manifest.count && g_repos.count > 0) {
+        draw_loading(&ui, "Updating catalogs...");
         refresh_catalogs(true);
+    }
     draw_shop(&ui);
 
     while (!g_quit && appletMainLoop()) {
@@ -1346,14 +1382,25 @@ int main(void) {
         const bool key_exit = keyboard_edge(&keyboard, HidKeyboardKey_Escape);
 
         if (g_confirm_action != CONFIRM_NONE) {
-            if ((down & HidNpadButton_A) || key_accept)
-                perform_confirm();
-            else if ((down & HidNpadButton_B) || key_exit)
+            bool changed = false;
+            if ((down & HidNpadButton_Left) || key_left) {
+                g_confirm_yes = true;
+                changed = true;
+            } else if ((down & HidNpadButton_Right) || key_right) {
+                g_confirm_yes = false;
+                changed = true;
+            } else if ((down & HidNpadButton_A) || key_accept) {
+                if (g_confirm_yes)
+                    perform_confirm();
+                else
+                    g_confirm_action = CONFIRM_NONE;
+            } else if ((down & HidNpadButton_B) || key_exit) {
                 g_confirm_action = CONFIRM_NONE;
+            }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (g_confirm_action == CONFIRM_NONE)
                 draw_repo_manager(&ui);
-            else
+            else if (changed)
                 draw_confirm(&ui);
             continue;
         }
