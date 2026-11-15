@@ -64,6 +64,7 @@ static int g_filter;
 static bool g_context_menu;
 static int g_context_selected;
 static PadState* g_pad;
+static bool g_return_to_repos;
 static int g_scroll_page;
 static bool g_repo_manager;
 static bool g_settings_screen;
@@ -381,9 +382,18 @@ static bool readme_for(HbPackage* package) {
     return false;
 }
 
+static void draw_shop_content(Ui* ui);
+
 static void draw_shop(Ui* ui) {
     if (!ui)
         return;
+    ui_begin(ui);
+    ui_clear(ui, COLOR_BACKGROUND);
+    draw_shop_content(ui);
+    ui_end(ui);
+}
+
+static void draw_shop_content(Ui* ui) {
     const int visible = visible_count();
     HbPackage* selected = visible ? visible_package(g_selected) : NULL;
     if (selected)
@@ -397,9 +407,6 @@ static void draw_shop(Ui* ui) {
                 icon_for(package);
         }
     }
-    ui_begin(ui);
-    ui_clear(ui, COLOR_BACKGROUND);
-
     ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
     ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
     ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
@@ -446,16 +453,11 @@ static void draw_shop(Ui* ui) {
         ui_text_truncated(ui, 958, 522, selected->target, 12, COLOR_MUTED, 268);
         const int button_y = 556;
         const char* primary_label = is_installed(selected) ? "A  Update" : "A  Install";
-        const char* secondary_label = "X  Menu";
         const int primary_width = ui_text_width(ui, primary_label, 15);
-        const int secondary_width = ui_text_width(ui, secondary_label, 15);
-        ui_rect(ui, 958, button_y, 128, 42,
+        ui_rect(ui, 958, button_y, 268, 42,
                 is_installed(selected) ? COLOR_ACCENT_DIM : COLOR_ACCENT);
-        ui_text(ui, 958 + (128 - primary_width) / 2, button_y + 13,
+        ui_text(ui, 958 + (268 - primary_width) / 2, button_y + 13,
                 primary_label, 15, COLOR_TEXT);
-        ui_rect(ui, 1100, button_y, 126, 42, COLOR_CARD);
-        ui_text(ui, 1100 + (126 - secondary_width) / 2, button_y + 13,
-                secondary_label, 15, COLOR_TEXT);
     }
 
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
@@ -468,7 +470,6 @@ static void draw_shop(Ui* ui) {
                 13, COLOR_MUTED);
     }
 
-    ui_end(ui);
 }
 
 static int test_repo_present(void) {
@@ -980,21 +981,29 @@ static void draw_context(Ui* ui) {
     if (!ui)
         return;
     static const char* const options[] = {
-        "Install / Update", "Remove", "Add git repo", "Refresh catalogs"
+        "Install / Update", "Remove", "Refresh catalogs"
     };
     ui_begin(ui);
     ui_clear(ui, COLOR_BACKGROUND);
-    ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
-    ui_text(ui, 24, 14, "Actions", 24, COLOR_TEXT);
-    for (int i = 0; i < 4; i++) {
-        const int y = 90 + i * 58;
+    draw_shop_content(ui);
+    ui_rect(ui, 0, 0, UI_WIDTH, UI_HEIGHT, RGBA8(0, 0, 0, 170));
+
+    const int panel_w = 480;
+    const int panel_h = 240;
+    const int panel_x = (UI_WIDTH - panel_w) / 2;
+    const int panel_y = (UI_HEIGHT - panel_h) / 2;
+    ui_rect(ui, panel_x, panel_y, panel_w, panel_h, COLOR_PANEL);
+    ui_rect(ui, panel_x, panel_y, panel_w, 3, COLOR_ACCENT);
+    ui_text(ui, panel_x + 24, panel_y + 22, "Actions", 22, COLOR_TEXT);
+    for (int i = 0; i < 3; i++) {
+        const int y = panel_y + 72 + i * 48;
         if (i == g_context_selected)
-            ui_rect(ui, 24, y - 8, UI_WIDTH - 48, 48, COLOR_CARD_HOVER);
-        ui_text(ui, 44, y, options[i], 19,
+            ui_rect(ui, panel_x + 12, y - 8, panel_w - 24, 40, COLOR_CARD_HOVER);
+        ui_text(ui, panel_x + 28, y, options[i], 17,
                 i == g_context_selected ? COLOR_TEXT : COLOR_MUTED);
     }
-    ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
-    ui_text(ui, 24, 682, "A select   B close", 13, COLOR_MUTED);
+    ui_text(ui, panel_x + 24, panel_y + panel_h - 24,
+            "A select   B close", 12, COLOR_MUTED);
     ui_end(ui);
 }
 
@@ -1018,10 +1027,6 @@ static void context_action(void) {
             }
             return;
         case 2:
-            g_context_menu = false;
-            add_test_repo();
-            return;
-        case 3:
             g_context_menu = false;
             refresh_catalogs(true);
             draw_shop(g_ui);
@@ -1392,17 +1397,24 @@ static bool write_test_package(const char* url, char* err, size_t err_size) {
     return true;
 }
 
+static void redraw_after_prompt(void) {
+    if (g_return_to_repos)
+        draw_repo_manager(g_ui);
+    else
+        draw_shop(g_ui);
+}
+
 static void add_test_repo(void) {
     char url[512];
     if (!prompt_git_repo(url, sizeof(url))) {
         set_status("Git repository URL was cancelled or invalid.");
-        draw_shop(g_ui);
+        redraw_after_prompt();
         return;
     }
     char error[256] = {0};
     if (!write_test_package(url, error, sizeof(error))) {
         set_status("Test repository failed: %s", error);
-        draw_shop(g_ui);
+        redraw_after_prompt();
         return;
     }
     g_filter = FILTER_ALL;
@@ -1416,37 +1428,37 @@ static void add_test_repo(void) {
         }
     }
     set_status("Added test repository. Press A to install.");
-    draw_shop(g_ui);
+    redraw_after_prompt();
 }
 
 static void add_repository(void) {
     char url[512];
     if (!prompt_repository(url, sizeof(url))) {
         set_status("Repository URL was cancelled or invalid.");
-        draw_shop(g_ui);
+        redraw_after_prompt();
         return;
     }
     const int added = repos_add(&g_repos, url);
     if (added < 0) {
         set_status("Repository URL is invalid or the list is full.");
-        draw_shop(g_ui);
+        redraw_after_prompt();
         return;
     }
     if (added == 1) {
         set_status("Repository is already in the list.");
-        draw_shop(g_ui);
+        redraw_after_prompt();
         return;
     }
     char error[256] = {0};
     if (repos_save(REPOS_PATH, &g_repos, error, sizeof(error)) != 0) {
         set_status("Could not save repos.json: %s", error);
-        draw_shop(g_ui);
+        redraw_after_prompt();
         return;
     }
     set_status("Added repository; loading catalog ...");
-    draw_shop(g_ui);
+    redraw_after_prompt();
     refresh_catalogs(true);
-    draw_shop(g_ui);
+    redraw_after_prompt();
 }
 
 static bool keyboard_edge(const HidKeyboardState* state, HidKeyboardKey key) {
@@ -1566,7 +1578,7 @@ int main(void) {
                     g_context_selected--;
                 changed = true;
             } else if ((down & HidNpadButton_Down) || key_down) {
-                if (g_context_selected < 3)
+                if (g_context_selected < 2)
                     g_context_selected++;
                 changed = true;
             } else if ((down & HidNpadButton_A) || key_accept) {
@@ -1629,11 +1641,13 @@ int main(void) {
             } else if ((down & HidNpadButton_X) || key_refresh) {
                 request_log_delete();
             } else if ((down & HidNpadButton_L) || key_test) {
-                g_repo_manager = false;
+                g_return_to_repos = true;
                 add_test_repo();
+                g_return_to_repos = false;
             } else if ((down & HidNpadButton_R) || key_add) {
-                g_repo_manager = false;
+                g_return_to_repos = true;
                 add_repository();
+                g_return_to_repos = false;
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)
