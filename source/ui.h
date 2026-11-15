@@ -31,6 +31,8 @@ void ui_text(Ui* ui, int x, int y, const char* text, int pixel_height, u32 color
 int ui_text_width(Ui* ui, const char* text, int pixel_height);
 void ui_text_wrap(Ui* ui, int x, int y, const char* text, int pixel_height,
                   u32 color, int max_width, int max_lines, int line_height);
+void ui_markdown_wrap(Ui* ui, int x, int y, const char* text, int pixel_height,
+                      u32 color, int max_width, int max_lines, int line_height);
 void ui_text_truncated(Ui* ui, int x, int y, const char* text, int pixel_height,
                        u32 color, int max_width);
 void ui_image(Ui* ui, int x, int y, int width, int height,

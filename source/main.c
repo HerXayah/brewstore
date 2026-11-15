@@ -375,8 +375,8 @@ static void draw_shop(Ui* ui) {
                     update ? COLOR_ACCENT : COLOR_GREEN);
         }
 
-        ui_text_wrap(ui, 958, 196, selected->description, 15, COLOR_TEXT,
-                     268, 8, 21);
+        ui_markdown_wrap(ui, 958, 196, selected->description, 15, COLOR_TEXT,
+                         268, 8, 21);
 
         ui_text_truncated(ui, 958, 522, selected->target, 12, COLOR_MUTED, 268);
         const int button_y = 556;

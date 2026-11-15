@@ -311,6 +311,74 @@ void ui_text_wrap(Ui* ui, int x, int y, const char* text, int pixel_height,
     }
 }
 
+void ui_markdown_wrap(Ui* ui, int x, int y, const char* text, int pixel_height,
+                      u32 color, int max_width, int max_lines, int line_height) {
+    if (!text)
+        return;
+    char plain[1024];
+    size_t used = 0;
+    int line_start = 1;
+    for (const char* p = text; *p && used + 1 < sizeof(plain); p++) {
+        if (*p == '\n') {
+            plain[used++] = '\n';
+            line_start = 1;
+            continue;
+        }
+        if (line_start) {
+            while (*p == ' ' || *p == '\t' || *p == '#' || *p == '>')
+                p++;
+            if (*p == '-' || *p == '*') {
+                while (*p == '-' || *p == '*')
+                    p++;
+                if (*p == ' ') {
+                    plain[used++] = '\xE2';
+                    if (used + 2 < sizeof(plain)) {
+                        plain[used++] = '\x80';
+                        plain[used++] = '\xA2';
+                    }
+                }
+            }
+            line_start = 0;
+        }
+        if ((p[0] == '*' && p[1] == '*') || (p[0] == '_' && p[1] == '_')) {
+            p++;
+            continue;
+        }
+        if (*p == '`')
+            continue;
+        if (p[0] == '!' && p[1] == '[') {
+            while (*p && *p != ')' && *p != '\n')
+                p++;
+            continue;
+        }
+        if (*p == '[') {
+            const char* close = strchr(p, ']');
+            if (close && close[1] == '(') {
+                for (const char* label = p + 1; label < close && used + 1 < sizeof(plain); label++)
+                    plain[used++] = *label;
+                p = close;
+                while (*p && *p != ')' && *p != '\n')
+                    p++;
+                continue;
+            }
+        }
+        if (*p == '<') {
+            const char* close = strchr(p, '>');
+            if (close) {
+                if (strncmp(p + 1, "http://", 7) == 0 || strncmp(p + 1, "https://", 8) == 0) {
+                    for (const char* label = p + 1; label < close && used + 1 < sizeof(plain); label++)
+                        plain[used++] = *label;
+                }
+                p = close;
+                continue;
+            }
+        }
+        plain[used++] = *p;
+    }
+    plain[used] = '\0';
+    ui_text_wrap(ui, x, y, plain, pixel_height, color, max_width, max_lines, line_height);
+}
+
 void ui_image(Ui* ui, int x, int y, int width, int height,
               const u32* pixels, int image_width, int image_height) {
     if (!pixels || image_width <= 0 || image_height <= 0 || width <= 0 || height <= 0)
