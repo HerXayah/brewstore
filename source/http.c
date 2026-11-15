@@ -184,6 +184,9 @@ static int connect_tcp(const char* host, int port, char* err, size_t err_size) {
             last_error = errno;
             continue;
         }
+        int socket_buffer = 512 * 1024;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &socket_buffer, sizeof(socket_buffer));
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &socket_buffer, sizeof(socket_buffer));
         if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) {
             result = fd;
             break;

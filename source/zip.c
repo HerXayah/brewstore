@@ -215,6 +215,7 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
         return -1;
     }
     int extract_done = 0;
+    char last_parent[1024] = "";
 
     if (unzGoToFirstFile(archive) != UNZ_OK) {
         unzClose(archive);
@@ -275,6 +276,7 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
                     set_error(err, err_size, "cannot create target directory");
                     return -1;
                 }
+                snprintf(last_parent, sizeof(last_parent), "%s", full);
             } else {
                 const mode_t type = (mode_t)((info.external_fa >> 16) & S_IFMT);
                 if (type == S_IFLNK) {
@@ -290,10 +292,13 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
                     char* slash = strrchr(parent, '/');
                     if (slash) {
                         *slash = '\0';
-                        if (path_mkdirs(parent) != 0) {
-                            unzClose(archive);
-                            set_error(err, err_size, "cannot create target directory");
-                            return -1;
+                        if (strcmp(parent, last_parent) != 0) {
+                            if (path_mkdirs(parent) != 0) {
+                                unzClose(archive);
+                                set_error(err, err_size, "cannot create target directory");
+                                return -1;
+                            }
+                            snprintf(last_parent, sizeof(last_parent), "%s", parent);
                         }
                     }
                     if (unzOpenCurrentFile(archive) != UNZ_OK) {
@@ -302,8 +307,6 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
                         return -1;
                     }
                     FILE* file = fopen(full, "wb");
-                    if (file)
-                        setvbuf(file, NULL, _IOFBF, 64 * 1024);
                     if (!file) {
                         unzCloseCurrentFile(archive);
                         unzClose(archive);

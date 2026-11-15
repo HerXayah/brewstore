@@ -1012,6 +1012,10 @@ static void extraction_progress(int current, int total, const char* name, void* 
     draw_install_progress(g_ui, title, step, percent);
 }
 
+static bool install_complete(const HbPackage* package) {
+    return !package->marker[0] || access(package->marker, F_OK) == 0;
+}
+
 static void install_redraw(void) {
     if (!g_batch_active)
         draw_shop(g_ui);
@@ -1094,7 +1098,7 @@ static void install_package(const HbPackage* package, PadState* pad) {
     }
 
     draw_install_progress(g_ui, package->title, "Preparing install", 10);
-    if (path_mkdirs(package->target) != 0) {
+    if (strcmp(package->target, "sdmc:/") != 0 && path_mkdirs(package->target) != 0) {
         set_status("Could not prepare the install target.");
         install_redraw();
         return;
@@ -1125,6 +1129,11 @@ static void install_package(const HbPackage* package, PadState* pad) {
     } else if (zip_extract(cache, package->target, package->strip_prefix, error,
                         sizeof(error), extraction_progress, (void*)package) != 0) {
         set_status("Extract failed: %s", error);
+        install_redraw();
+        return;
+    }
+    if (!install_complete(package)) {
+        set_status("Install incomplete: expected file was not written.");
         install_redraw();
         return;
     }
@@ -1246,7 +1255,7 @@ static bool batch_install(const PreparedPackage* prepared) {
         return false;
     }
     draw_install_progress(g_ui, package->title, "Preparing install", 10);
-    if (path_mkdirs(package->target) != 0) {
+    if (strcmp(package->target, "sdmc:/") != 0 && path_mkdirs(package->target) != 0) {
         set_status("Could not prepare %s.", package->title);
         return false;
     }
@@ -1276,6 +1285,10 @@ static bool batch_install(const PreparedPackage* prepared) {
     } else if (zip_extract(prepared->cache, package->target, package->strip_prefix,
                            error, sizeof(error), extraction_progress, (void*)package) != 0) {
         set_status("Extract failed: %s", error);
+        return false;
+    }
+    if (!install_complete(package)) {
+        set_status("Install incomplete: expected file was not written.");
         return false;
     }
     draw_install_progress(g_ui, package->title, "Finishing", 90);
