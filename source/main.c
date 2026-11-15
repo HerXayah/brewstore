@@ -1062,8 +1062,7 @@ static void context_action(void) {
             g_selected = 0;
             g_scroll_page = 0;
             clamp_selection();
-            g_context_menu = false;
-            draw_shop(g_ui);
+            draw_context(g_ui);
             return;
         default:
             return;
