@@ -26,6 +26,7 @@ typedef struct {
     char sha256[65];
     bool target_explicit;
     bool readme_fallback;
+    bool shortcut;
 } HbPackage;
 
 typedef struct {

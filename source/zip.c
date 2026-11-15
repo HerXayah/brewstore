@@ -153,8 +153,14 @@ static int count_extractable(unzFile archive, const char* prefix) {
         if (unzGetCurrentFileInfo(archive, &info, name, sizeof(name), NULL, 0, NULL, 0) != UNZ_OK ||
             info.size_filename >= sizeof(name))
             return -1;
-        if (strncmp(name, prefix, prefix_length) != 0)
-            return -1;
+        if (strncmp(name, prefix, prefix_length) != 0) {
+            const int next = unzGoToNextFile(archive);
+            if (next == UNZ_END_OF_LIST_OF_FILE)
+                break;
+            if (next != UNZ_OK)
+                return -1;
+            continue;
+        }
         const char* relative = name + prefix_length;
         const bool directory = relative[0] && relative[strlen(relative) - 1] == '/';
         const mode_t type = (mode_t)((info.external_fa >> 16) & S_IFMT);
@@ -187,7 +193,7 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
             return -1;
         }
         strcpy(prefix, strip_prefix);
-    } else {
+    } else if (strcmp(target, "sdmc:/") != 0) {
         char root[128];
         const int detected = detect_root(archive, root, sizeof(root));
         if (detected < 0) {
@@ -214,6 +220,11 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
         set_error(err, err_size, "cannot count archive entries");
         return -1;
     }
+    if (prefix_length && extract_total == 0) {
+        unzClose(archive);
+        set_error(err, err_size, "stripPrefix matched no archive entries");
+        return -1;
+    }
     int extract_done = 0;
     char last_parent[1024] = "";
 
@@ -234,9 +245,15 @@ int zip_extract(const char* archive_path, const char* target, const char* strip_
             return -1;
         }
         if (strncmp(name, prefix, prefix_length) != 0) {
-            unzClose(archive);
-            set_error(err, err_size, "archive entry does not match stripPrefix");
-            return -1;
+            const int next = unzGoToNextFile(archive);
+            if (next == UNZ_END_OF_LIST_OF_FILE)
+                break;
+            if (next != UNZ_OK) {
+                unzClose(archive);
+                set_error(err, err_size, "cannot advance archive");
+                return -1;
+            }
+            continue;
         }
 
         const char* relative = name + prefix_length;

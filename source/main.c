@@ -4,6 +4,8 @@
 // under sdmc:/switch. It never handles NSP/NAND content.
 #include <switch.h>
 
+#include <ctype.h>
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -21,6 +23,7 @@
 #include "readme.h"
 #include "repos.h"
 #include "settings.h"
+#include "shortcuts.h"
 #include "ui.h"
 #include "version.h"
 #include "zip.h"
@@ -34,6 +37,7 @@
 #define INSTALLED_DIR "sdmc:/switch/brewstore/installed"
 #define README_DIR CACHE_DIR "/readme"
 #define SETTINGS_PATH "sdmc:/switch/brewstore/settings.json"
+#define SHORTCUTS_PATH "sdmc:/switch/shortcuts.txt"
 #define DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json"
 #define VISIBLE_COLUMNS 3
 #define VISIBLE_ROWS 2
@@ -110,6 +114,7 @@ static bool prompt_text(const char* header, const char* guide, const char* initi
 static void draw_confirm(Ui* ui);
 static void add_test_repo(void);
 static void add_repository(void);
+static void repo_cache_path(const char* url, char* out, size_t out_size);
 
 static void set_status(const char* format, ...) {
     va_list args;
@@ -193,6 +198,22 @@ static bool read_state(const HbPackage* package, char* version, size_t version_s
     return true;
 }
 
+static bool directory_nonempty(const char* path) {
+    DIR* dir = opendir(path);
+    if (!dir)
+        return false;
+    struct dirent* entry;
+    bool found = false;
+    while ((entry = readdir(dir))) {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            found = true;
+            break;
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
 static bool is_installed(const HbPackage* package) {
     char path[512];
     const bool has_state =
@@ -205,13 +226,14 @@ static bool is_installed(const HbPackage* package) {
                        file, sizeof(file), NULL, NULL)) {
             if (file[0])
                 return access(file, F_OK) == 0;
-            if (package->marker[0])
-                return access(package->marker, F_OK) == 0;
-            if (strcmp(package->target, "sdmc:/switch") != 0 &&
-                strcmp(package->target, "sdmc:/") != 0)
-                return access(package->target, F_OK) == 0;
+            if (package->marker[0] && access(package->marker, F_OK) == 0)
+                return true;
         }
     }
+    if (strcmp(package->target, "sdmc:/switch") != 0 &&
+        strcmp(package->target, "sdmc:/") != 0 &&
+        directory_nonempty(package->target))
+        return true;
     return package->marker[0] && access(package->marker, F_OK) == 0;
 }
 
@@ -619,6 +641,22 @@ static int repo_entry_count(void) {
     return g_repos.count + test_repo_present();
 }
 
+static void format_file_time(const char* path, char* out, size_t out_size) {
+    struct stat status;
+    if (stat(path, &status) != 0) {
+        snprintf(out, out_size, "Updated never");
+        return;
+    }
+    struct tm parts;
+    if (!localtime_r(&status.st_mtime, &parts)) {
+        snprintf(out, out_size, "Updated unknown");
+        return;
+    }
+    char date[32];
+    strftime(date, sizeof(date), "%Y-%m-%d %H:%M", &parts);
+    snprintf(out, out_size, "Updated %s", date);
+}
+
 static void draw_repo_manager(Ui* ui) {
     if (!ui)
         return;
@@ -638,14 +676,33 @@ static void draw_repo_manager(Ui* ui) {
             if (i == g_repo_selected)
                 ui_rect(ui, 24, y - 6, UI_WIDTH - 48, 44, COLOR_CARD_HOVER);
             if (i < g_repos.count) {
+                char cache[640];
+                char updated[64];
+                repo_cache_path(g_repos.urls[i], cache, sizeof(cache));
+                format_file_time(cache, updated, sizeof(updated));
+                const int date_width = ui_text_width(ui, updated, 12);
+                const int date_x = UI_WIDTH - 40 - date_width;
+                int right = date_x - 16;
+                if (!g_repos.enabled[i]) {
+                    const char* disabled = "(disabled)";
+                    const int disabled_width = ui_text_width(ui, disabled, 13);
+                    ui_text(ui, right - disabled_width, y, disabled, 13, COLOR_MUTED);
+                    right -= disabled_width + 12;
+                }
+                int url_width = right - 40;
+                if (url_width < 40)
+                    url_width = 40;
                 ui_text_truncated(ui, 40, y, g_repos.urls[i], 16,
                                   g_repos.enabled[i] ? COLOR_TEXT : COLOR_MUTED,
-                                  UI_WIDTH - 80);
-                if (!g_repos.enabled[i])
-                    ui_text(ui, UI_WIDTH - 130, y, "(disabled)", 13, COLOR_MUTED);
+                                  url_width);
+                ui_text(ui, date_x, y + 2, updated, 12, COLOR_MUTED);
             } else {
+                char updated[64];
+                format_file_time(TEST_REPO_PATH, updated, sizeof(updated));
+                const int date_width = ui_text_width(ui, updated, 12);
                 ui_text(ui, 40, y, "Test repository", 16, COLOR_TEXT);
                 ui_text(ui, 250, y + 1, "test-repo.json", 14, COLOR_MUTED);
+                ui_text(ui, UI_WIDTH - 40 - date_width, y + 2, updated, 12, COLOR_MUTED);
             }
         }
     }
@@ -1016,6 +1073,93 @@ static bool install_complete(const HbPackage* package) {
     return !package->marker[0] || access(package->marker, F_OK) == 0;
 }
 
+static bool name_contains_ci(const char* text, const char* needle) {
+    const size_t length = strlen(needle);
+    if (!length)
+        return true;
+    for (; *text; text++) {
+        size_t i = 0;
+        while (i < length && text[i] &&
+               tolower((unsigned char)text[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == length)
+            return true;
+    }
+    return false;
+}
+
+static void find_nro_in(const char* directory, const char* package,
+                        char* preferred, size_t preferred_size,
+                        char* fallback, size_t fallback_size, int depth) {
+    if (depth > 8)
+        return;
+    DIR* dir = opendir(directory);
+    if (!dir)
+        return;
+    struct dirent* entry;
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.')
+            continue;
+        char path[1024];
+        const int written = snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name);
+        if (written <= 0 || (size_t)written >= sizeof(path))
+            continue;
+        struct stat status;
+        if (lstat(path, &status) != 0)
+            continue;
+        if (S_ISDIR(status.st_mode)) {
+            find_nro_in(path, package, preferred, preferred_size,
+                        fallback, fallback_size, depth + 1);
+        } else if (ends_with_ci(path, ".nro")) {
+            if (!fallback[0])
+                snprintf(fallback, fallback_size, "%.*s", (int)fallback_size - 1, path);
+            if (!preferred[0]) {
+                const char* base = strrchr(path, '/');
+                base = base ? base + 1 : path;
+                if (name_contains_ci(base, package))
+                    snprintf(preferred, preferred_size, "%s", path);
+            }
+        }
+    }
+    closedir(dir);
+}
+
+static bool shortcut_target(const HbPackage* package, const char* installed_file,
+                            char* out, size_t out_size) {
+    out[0] = '\0';
+    if (installed_file && installed_file[0] && ends_with_ci(installed_file, ".nro") &&
+        access(installed_file, F_OK) == 0) {
+        snprintf(out, out_size, "%s", installed_file);
+        return true;
+    }
+    if (package->marker[0] && ends_with_ci(package->marker, ".nro") &&
+        access(package->marker, F_OK) == 0) {
+        snprintf(out, out_size, "%s", package->marker);
+        return true;
+    }
+    if (strcmp(package->target, "sdmc:/") == 0)
+        return false;
+
+    char preferred[512] = "";
+    char fallback[512] = "";
+    find_nro_in(package->target, package->name, preferred, sizeof(preferred),
+                fallback, sizeof(fallback), 0);
+    if (preferred[0] || fallback[0]) {
+        snprintf(out, out_size, "%s", preferred[0] ? preferred : fallback);
+        return true;
+    }
+    return false;
+}
+
+static void update_shortcut(const HbPackage* package, const char* installed_file) {
+    char nro[512];
+    if (package->shortcut &&
+        shortcut_target(package, installed_file, nro, sizeof(nro)))
+        shortcuts_set(SHORTCUTS_PATH, package->name, package->title, nro);
+    else
+        shortcuts_remove(SHORTCUTS_PATH, package->name);
+}
+
 static void install_redraw(void) {
     if (!g_batch_active)
         draw_shop(g_ui);
@@ -1151,6 +1295,7 @@ static void install_package(const HbPackage* package, PadState* pad) {
         installed_at = now;
     updated_at = now;
     write_state(package, hash, installed_file, installed_at, updated_at);
+    update_shortcut(package, installed_file);
     if (strcmp(package->version, "latest") == 0 ||
         strcmp(package->version, "test") == 0 ||
         strcmp(package->version, "unknown") == 0)
@@ -1158,6 +1303,18 @@ static void install_package(const HbPackage* package, PadState* pad) {
     else
         set_status("Installed %s %s", package->title, package->version);
     install_redraw();
+}
+
+static void prune_empty_parents(char* path) {
+    char* slash = strrchr(path, '/');
+    while (slash) {
+        *slash = '\0';
+        if (strcmp(path, "sdmc:") == 0 || strcmp(path, "sdmc:/") == 0)
+            break;
+        if (rmdir(path) != 0)
+            break;
+        slash = strrchr(path, '/');
+    }
 }
 
 static void remove_package(const HbPackage* package) {
@@ -1170,6 +1327,15 @@ static void remove_package(const HbPackage* package) {
                                       NULL, NULL);
     if (has_state && installed_file[0]) {
         remove(installed_file);
+    } else if (strcmp(package->target, "sdmc:/") == 0 && package->marker[0]) {
+        char marker[512];
+        snprintf(marker, sizeof(marker), "%s", package->marker);
+        if (access(marker, F_OK) == 0 && remove(marker) != 0) {
+            set_status("Could not remove %s.", package->title);
+            draw_shop(g_ui);
+            return;
+        }
+        prune_empty_parents(marker);
     } else if (strcmp(package->target, "sdmc:/switch") == 0 ||
                strcmp(package->target, "sdmc:/") == 0) {
         set_status("Refusing to delete the SD card root or /switch itself.");
@@ -1183,6 +1349,8 @@ static void remove_package(const HbPackage* package) {
     char path[512];
     if (state_path(package, path, sizeof(path)) == 0)
         remove(path);
+    shortcuts_remove(SHORTCUTS_PATH, package->name);
+    clamp_selection();
     set_status("Removed %s.", package->title);
     draw_shop(g_ui);
 }
@@ -1303,6 +1471,7 @@ static bool batch_install(const PreparedPackage* prepared) {
     if (!installed_at)
         installed_at = now;
     write_state(package, prepared->hash, installed_file, installed_at, now);
+    update_shortcut(package, installed_file);
     return true;
 }
 
@@ -1911,6 +2080,7 @@ int main(void) {
 
     if (settings_load(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0)
         snprintf(g_status, sizeof(g_status), "settings.json: %s", error);
+    path_mkdirs(g_settings.default_install_path);
 
     if (repos_load(REPOS_PATH, &g_repos, error, sizeof(error)) != 0) {
         snprintf(g_status, sizeof(g_status), "repos.json: %s", error);

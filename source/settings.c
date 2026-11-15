@@ -11,6 +11,8 @@
 #include <string.h>
 
 #define SETTINGS_MAX 8192
+#define DEFAULT_INSTALL_PATH "sdmc:/switch/brewstore/apps"
+#define LEGACY_INSTALL_PATH "sdmc:/switch"
 
 static int fail(char* err, size_t err_size, const char* message) {
     if (err && err_size)
@@ -64,7 +66,7 @@ int settings_save(const char* path, const AppSettings* settings, char* err, size
 
 int settings_load(const char* path, AppSettings* settings, char* err, size_t err_size) {
     memset(settings, 0, sizeof(*settings));
-    strcpy(settings->default_install_path, "sdmc:/switch");
+    strcpy(settings->default_install_path, DEFAULT_INSTALL_PATH);
     settings->download_proxy[0] = '\0';
 
     FILE* file = fopen(path, "rb");
@@ -120,5 +122,8 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
         }
         position = value + 1;
     }
+    if (strcmp(settings->default_install_path, LEGACY_INSTALL_PATH) == 0)
+        snprintf(settings->default_install_path, sizeof(settings->default_install_path),
+                 "%s", DEFAULT_INSTALL_PATH);
     return 0;
 }

@@ -151,6 +151,33 @@ static int object_get(const char* json, const jsmntok_t* tokens, int count, int 
     return -1;
 }
 
+static int object_get_bool(const char* json, const jsmntok_t* tokens, int count, int object,
+                           const char* key, bool* out) {
+    if (object < 0 || object >= count || tokens[object].type != JSMN_OBJECT)
+        return -1;
+    int pos = object + 1;
+    for (int pair = 0; pair < tokens[object].size && pos < count; pair++) {
+        const int value = pos + 1;
+        char name[64];
+        if (token_string(json, &tokens[pos], name, sizeof(name)) == 0 &&
+            strcmp(name, key) == 0 && value < count &&
+            tokens[value].type == JSMN_PRIMITIVE) {
+            const size_t length = (size_t)(tokens[value].end - tokens[value].start);
+            if (length == 4 && memcmp(json + tokens[value].start, "true", 4) == 0) {
+                *out = true;
+                return 0;
+            }
+            if (length == 5 && memcmp(json + tokens[value].start, "false", 5) == 0) {
+                *out = false;
+                return 0;
+            }
+            return -1;
+        }
+        pos = token_skip(tokens, value, count);
+    }
+    return -1;
+}
+
 static int array_get_json(const char* json, const jsmntok_t* tokens, int count, int object,
                           const char* key) {
     if (object < 0 || object >= count || tokens[object].type != JSMN_OBJECT)
@@ -353,6 +380,7 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
         HbPackage* pkg = &manifest->items[manifest->count];
         memset(pkg, 0, sizeof(*pkg));
         pkg->target_explicit = false;
+        pkg->shortcut = true;
         strcpy(pkg->branch, "main");
         if (object_get(text, tokens, count, object, "name", pkg->name, sizeof(pkg->name)) != 0 ||
             !safe_name(pkg->name)) {
@@ -368,6 +396,7 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
             strcpy(pkg->author, "Unknown");
         object_get(text, tokens, count, object, "description", pkg->description,
                    sizeof(pkg->description));
+        object_get_bool(text, tokens, count, object, "shortcut", &pkg->shortcut);
         object_get(text, tokens, count, object, "icon", pkg->icon, sizeof(pkg->icon));
         object_get(text, tokens, count, object, "release", pkg->release, sizeof(pkg->release));
         object_get(text, tokens, count, object, "asset", pkg->asset, sizeof(pkg->asset));
@@ -446,11 +475,11 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
                 pkg->target[strlen(pkg->target) - 1] = '\0';
         object_get(text, tokens, count, object, "marker", pkg->marker, sizeof(pkg->marker));
         if (pkg->marker[0] &&
-            (strncmp(pkg->marker, "sdmc:/switch/", 13) != 0 ||
+            (strncmp(pkg->marker, "sdmc:/", 6) != 0 || pkg->marker[6] == '\0' ||
              strstr(pkg->marker, "..") || strchr(pkg->marker, '\\'))) {
             free(tokens);
             free(text);
-            return fail(err, err_size, "marker must be under sdmc:/switch/");
+            return fail(err, err_size, "marker must be a safe sdmc path");
         }
         if (!valid_target(pkg->target)) {
             free(tokens);
