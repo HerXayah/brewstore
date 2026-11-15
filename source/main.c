@@ -1548,6 +1548,7 @@ int main(void) {
                 else
                     g_confirm_action = CONFIRM_NONE;
             } else if ((down & HidNpadButton_B) || key_exit) {
+                g_ignore_b = true;
                 g_confirm_action = CONFIRM_NONE;
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
@@ -1571,6 +1572,7 @@ int main(void) {
             } else if ((down & HidNpadButton_A) || key_accept) {
                 context_action();
             } else if ((down & HidNpadButton_B) || key_exit) {
+                g_ignore_b = true;
                 g_context_menu = false;
                 draw_shop(&ui);
             }
@@ -1585,6 +1587,7 @@ int main(void) {
                 break;
             bool changed = false;
             if ((down & (HidNpadButton_B | HidNpadButton_ZL)) || key_exit) {
+                g_ignore_b = true;
                 g_settings_screen = false;
                 draw_shop(&ui);
             } else if ((down & HidNpadButton_Up) || key_up) {
@@ -1610,6 +1613,7 @@ int main(void) {
                 break;
             bool changed = false;
             if ((down & (HidNpadButton_B | HidNpadButton_ZR)) || key_exit || key_manager) {
+                g_ignore_b = true;
                 g_repo_manager = false;
                 refresh_catalogs(false);
                 draw_shop(&ui);
