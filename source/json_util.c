@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include "json_util.h"
+#pragma GCC diagnostic pop
 
 #include <string.h>
 

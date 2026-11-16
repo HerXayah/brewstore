@@ -13,6 +13,60 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#define GLYPH_CACHE_SIZE 256
+
+typedef struct {
+    unsigned codepoint;
+    int pixel_height;
+    int width;
+    int height;
+    int xoff;
+    int yoff;
+    unsigned char* bitmap;
+    bool valid;
+} GlyphCacheEntry;
+
+static GlyphCacheEntry g_glyphs[GLYPH_CACHE_SIZE];
+static int g_glyph_count;
+static int g_glyph_next;
+
+static void glyph_cache_clear(void) {
+    for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
+        if (g_glyphs[i].bitmap)
+            stbtt_FreeBitmap(g_glyphs[i].bitmap, NULL);
+        g_glyphs[i].bitmap = NULL;
+        g_glyphs[i].valid = false;
+    }
+    g_glyph_count = 0;
+    g_glyph_next = 0;
+}
+
+static const GlyphCacheEntry* glyph_for(Ui* ui, unsigned codepoint, int pixel_height,
+                                        float scale) {
+    for (int i = 0; i < g_glyph_count; i++) {
+        if (g_glyphs[i].valid && g_glyphs[i].codepoint == codepoint &&
+            g_glyphs[i].pixel_height == pixel_height)
+            return &g_glyphs[i];
+    }
+    GlyphCacheEntry* slot;
+    if (g_glyph_count < GLYPH_CACHE_SIZE) {
+        slot = &g_glyphs[g_glyph_count++];
+    } else {
+        slot = &g_glyphs[g_glyph_next];
+        g_glyph_next = (g_glyph_next + 1) % GLYPH_CACHE_SIZE;
+        if (slot->bitmap)
+            stbtt_FreeBitmap(slot->bitmap, NULL);
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->codepoint = codepoint;
+    slot->pixel_height = pixel_height;
+    slot->bitmap = stbtt_GetCodepointBitmap(ui->font, scale, scale, (int)codepoint,
+                                            &slot->width, &slot->height,
+                                            &slot->xoff, &slot->yoff);
+    slot->valid = true;
+    return slot;
+}
+
 static unsigned utf8_next(const char** cursor) {
     const unsigned char* text = (const unsigned char*)*cursor;
     if (!*text)
@@ -72,6 +126,7 @@ static void put_pixel(Ui* ui, int x, int y, u32 color) {
 }
 
 int ui_init(Ui* ui, char* err, size_t err_size) {
+    glyph_cache_clear();
     memset(ui, 0, sizeof(*ui));
     Result rc = plInitialize(PlServiceType_User);
     if (R_FAILED(rc)) {
@@ -114,6 +169,7 @@ void ui_exit(Ui* ui) {
     }
     free(ui->font);
     ui->font = NULL;
+    glyph_cache_clear();
     if (ui->pl_open) {
         plExit();
         ui->pl_open = false;
@@ -196,19 +252,13 @@ void ui_text(Ui* ui, int x, int y, const char* text, int pixel_height, u32 color
         stbtt_GetCodepointHMetrics(ui->font, (int)codepoint, &advance, &bearing);
         if (previous)
             pen += stbtt_GetCodepointKernAdvance(ui->font, (int)previous, (int)codepoint) * scale;
-        int width = 0;
-        int height = 0;
-        int xoff = 0;
-        int yoff = 0;
-        unsigned char* bitmap = stbtt_GetCodepointBitmap(ui->font, scale, scale,
-                                                         (int)codepoint, &width, &height,
-                                                         &xoff, &yoff);
-        if (bitmap) {
-            const int draw_x = (int)(pen + 0.5f) + xoff;
-            const int draw_y = baseline + yoff;
-            for (int row = 0; row < height; row++) {
-                for (int column = 0; column < width; column++) {
-                    const u32 coverage = bitmap[row * width + column];
+        const GlyphCacheEntry* glyph = glyph_for(ui, codepoint, pixel_height, scale);
+        if (glyph && glyph->bitmap) {
+            const int draw_x = (int)(pen + 0.5f) + glyph->xoff;
+            const int draw_y = baseline + glyph->yoff;
+            for (int row = 0; row < glyph->height; row++) {
+                for (int column = 0; column < glyph->width; column++) {
+                    const u32 coverage = glyph->bitmap[row * glyph->width + column];
                     if (!coverage)
                         continue;
                     const u32 alpha = (coverage * (color >> 24)) / 255;
@@ -216,7 +266,6 @@ void ui_text(Ui* ui, int x, int y, const char* text, int pixel_height, u32 color
                               (color & 0x00ffffff) | (alpha << 24));
                 }
             }
-            stbtt_FreeBitmap(bitmap, NULL);
         }
         pen += advance * scale;
         previous = codepoint;
@@ -383,6 +432,13 @@ void ui_image(Ui* ui, int x, int y, int width, int height,
               const u32* pixels, int image_width, int image_height) {
     if (!pixels || image_width <= 0 || image_height <= 0 || width <= 0 || height <= 0)
         return;
+    if (width == image_width && height == image_height) {
+        for (int row = 0; row < height; row++)
+            for (int column = 0; column < width; column++)
+                put_pixel(ui, x + column, y + row,
+                          pixels[row * image_width + column]);
+        return;
+    }
     const float scale_x = (float)width / (float)image_width;
     const float scale_y = (float)height / (float)image_height;
     const float scale = scale_x < scale_y ? scale_x : scale_y;

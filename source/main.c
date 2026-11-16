@@ -57,6 +57,7 @@
 #define COLOR_MUTED RGBA8(143, 152, 166, 255)
 #define COLOR_GREEN RGBA8(128, 201, 153, 255)
 #define COLOR_RED RGBA8(230, 120, 120, 255)
+#define CARD_ICON_SIZE 96
 
 typedef struct {
     char name[64];
@@ -278,26 +279,13 @@ static void format_installed_time(unsigned long long timestamp, char* out, size_
         strftime(out, out_size, "%Y-%m-%d %H:%M", &parts);
 }
 
-static bool update_available(const HbPackage* package) {
-    if (!is_installed(package))
-        return false;
-    char installed_version[64];
-    char installed_hash[65];
-    if (!read_state(package, installed_version, sizeof(installed_version),
-                    installed_hash, sizeof(installed_hash), NULL, 0, NULL, NULL))
-        return false;
-    if (version_is_newer(package->version, installed_version))
-        return true;
-    if (package->sha256[0] && installed_hash[0] &&
-        strcasecmp(package->sha256, installed_hash) != 0)
-        return true;
-    return false;
-}
-
 typedef struct {
     bool checked;
     bool installed;
     bool update;
+    bool times_known;
+    unsigned long long installed_at;
+    unsigned long long updated_at;
 } InstalledState;
 
 static InstalledState g_installed[HBPKG_MAX_PACKAGES];
@@ -312,10 +300,24 @@ static const InstalledState* package_state(const HbPackage* package) {
     if (index < 0 || index >= g_manifest.count)
         return NULL;
     if (!g_installed[index].checked) {
-        g_installed[index].installed = is_installed(package);
-        g_installed[index].update =
-            g_installed[index].installed && update_available(package);
-        g_installed[index].checked = true;
+        InstalledState* state = &g_installed[index];
+        state->installed = is_installed(package);
+        if (state->installed) {
+            char installed_version[64];
+            char installed_hash[65];
+            if (read_state(package, installed_version, sizeof(installed_version),
+                           installed_hash, sizeof(installed_hash), NULL, 0,
+                           &state->installed_at, &state->updated_at)) {
+                state->times_known = true;
+                if (version_is_newer(package->version, installed_version) ||
+                    (package->sha256[0] && installed_hash[0] &&
+                     strcasecmp(package->sha256, installed_hash) != 0))
+                    state->update = true;
+            }
+        } else {
+            state->times_known = true;
+        }
+        state->checked = true;
     }
     return &g_installed[index];
 }
@@ -382,6 +384,9 @@ static int visible_count(void) {
 }
 
 static unsigned long long package_timestamp(const HbPackage* package, bool installed) {
+    const InstalledState* state = package_state(package);
+    if (state && state->times_known)
+        return installed ? state->installed_at : state->updated_at;
     char version[64];
     char hash[65];
     char file[512];
@@ -442,12 +447,51 @@ static void free_icons(void) {
     g_icon_count = 0;
 }
 
+static u32* scale_icon(const u32* pixels, int width, int height) {
+    if (!pixels || width <= 0 || height <= 0)
+        return NULL;
+    u32* scaled = calloc((size_t)CARD_ICON_SIZE * CARD_ICON_SIZE, sizeof(u32));
+    if (!scaled)
+        return NULL;
+    int draw_width;
+    int draw_height;
+    if (width >= height) {
+        draw_width = CARD_ICON_SIZE;
+        draw_height = height * CARD_ICON_SIZE / width;
+    } else {
+        draw_height = CARD_ICON_SIZE;
+        draw_width = width * CARD_ICON_SIZE / height;
+    }
+    if (draw_width < 1)
+        draw_width = 1;
+    if (draw_height < 1)
+        draw_height = 1;
+    const int offset_x = (CARD_ICON_SIZE - draw_width) / 2;
+    const int offset_y = (CARD_ICON_SIZE - draw_height) / 2;
+    for (int row = 0; row < draw_height; row++) {
+        const int source_y = row * height / draw_height;
+        for (int column = 0; column < draw_width; column++) {
+            const int source_x = column * width / draw_width;
+            scaled[(offset_y + row) * CARD_ICON_SIZE + offset_x + column] =
+                pixels[source_y * width + source_x];
+        }
+    }
+    return scaled;
+}
+
 static const CachedIcon* cache_icon(const HbPackage* package, u32* pixels,
                                     int width, int height) {
     if (g_icon_count >= (int)(sizeof(g_icons) / sizeof(g_icons[0]))) {
         free(g_icons[0].pixels);
         memmove(&g_icons[0], &g_icons[1], sizeof(g_icons[0]) * (g_icon_count - 1));
         g_icon_count--;
+    }
+    u32* scaled = scale_icon(pixels, width, height);
+    if (scaled) {
+        free(pixels);
+        pixels = scaled;
+        width = CARD_ICON_SIZE;
+        height = CARD_ICON_SIZE;
     }
     CachedIcon* slot = &g_icons[g_icon_count++];
     snprintf(slot->name, sizeof(slot->name), "%s", package->name);
@@ -515,7 +559,7 @@ static void draw_loading(Ui* ui, const char* message) {
 static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selected,
                       bool marked) {
     const int width = 276;
-    const int height = 232;
+    const int height = 248;
     if (selected) {
         ui_rect(ui, x - 2, y - 2, width + 4, height + 4, COLOR_ACCENT);
         ui_rect(ui, x, y, width, height, COLOR_CARD_HOVER);
@@ -528,7 +572,7 @@ static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selec
         ui_text(ui, x + width - 25, y + 11, "*", 16, COLOR_BACKGROUND);
     }
 
-    const int icon_size = 96;
+    const int icon_size = CARD_ICON_SIZE;
     const int icon_x = x + (width - icon_size) / 2;
     const int icon_y = y + 18;
     ui_rect(ui, icon_x, icon_y, icon_size, icon_size, COLOR_PANEL);
@@ -553,7 +597,7 @@ static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selec
         if (state && state->installed) {
             const char* label = state->update ? "Update" : "Installed";
             const int label_width = ui_text_width(ui, label, 13);
-            ui_text(ui, x + width - 14 - label_width, y + 204, label, 13,
+            ui_text(ui, x + width - 14 - label_width, y + 216, label, 13,
                     state->update ? COLOR_ACCENT : COLOR_GREEN);
         }
     }
@@ -640,7 +684,7 @@ static void draw_shop_content(Ui* ui) {
             const int column = slot % VISIBLE_COLUMNS;
             const int row = slot / VISIBLE_COLUMNS;
             draw_card(ui, package, 32 + column * 292,
-                      76 + row * 248, index == g_selected, is_marked(package));
+                      76 + row * 264, index == g_selected, is_marked(package));
         }
 
         ui_rect(ui, 936, 76, 312, 568, COLOR_PANEL);
