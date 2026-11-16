@@ -6,6 +6,7 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -224,7 +225,7 @@ static bool file_list_has_existing(const HbPackage* package) {
     snprintf(list_path, sizeof(list_path), INSTALLED_DIR "/%s.files", package->name);
     FILE* list = fopen(list_path, "rb");
     if (!list)
-        return false;
+        return 0;
     char line[1024];
     bool found = false;
     while (fgets(line, sizeof(line), list)) {
@@ -1567,12 +1568,12 @@ static void prune_empty_parents(char* path) {
     }
 }
 
-static bool remove_file_list(const HbPackage* package) {
+static int remove_file_list(const HbPackage* package) {
     char list_path[512];
     snprintf(list_path, sizeof(list_path), INSTALLED_DIR "/%s.files", package->name);
     FILE* list = fopen(list_path, "rb");
     if (!list)
-        return false;
+        return 0;
 
     char line[1024];
     int total = 0;
@@ -1595,7 +1596,10 @@ static bool remove_file_list(const HbPackage* package) {
             continue;
         char path[1024];
         snprintf(path, sizeof(path), "%s", line);
-        remove(path);
+        if (remove(path) != 0 && errno != ENOENT) {
+            fclose(list);
+            return -1;
+        }
         prune_empty_parents(path);
         done++;
         if (done == total || done % stride == 0)
@@ -1603,7 +1607,7 @@ static bool remove_file_list(const HbPackage* package) {
     }
     fclose(list);
     remove(list_path);
-    return true;
+    return 1;
 }
 
 static void remove_package(const HbPackage* package) {
@@ -1614,7 +1618,13 @@ static void remove_package(const HbPackage* package) {
                                       installed_hash, sizeof(installed_hash),
                                       installed_file, sizeof(installed_file),
                                       NULL, NULL);
-    if (remove_file_list(package)) {
+    const int list_result = remove_file_list(package);
+    if (list_result < 0) {
+        set_status("Could not remove %s; close it and retry.", package->title);
+        draw_shop(g_ui);
+        return;
+    }
+    if (list_result > 0) {
         /* All files written by the last install were listed. */
     } else if (has_state && installed_file[0]) {
         remove(installed_file);
@@ -2424,21 +2434,26 @@ static void migrate_brewstore_root(void) {
         return;
 
     bool moved = false;
+    bool apps_moved = false;
     if (access(BREWSTORE_ROOT, F_OK) != 0) {
         if (rename(LEGACY_BREWSTORE_ROOT, BREWSTORE_ROOT) != 0)
             return;
         moved = true;
+        apps_moved = true;
     } else {
         const char* entries[] = {
             "packages.json", "test-repo.json", "repos.json", "settings.json",
             "cache", "installed", "apps"
         };
         for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
-            if (move_legacy_entry(entries[i]))
+            if (move_legacy_entry(entries[i])) {
                 moved = true;
+                if (strcmp(entries[i], "apps") == 0)
+                    apps_moved = true;
+            }
         }
     }
-    if (!moved)
+    if (!moved || !apps_moved)
         return;
     rewrite_installed_paths();
     replace_file_prefix(SHORTCUTS_PATH, "sdmc:/switch/brewstore/apps/",
