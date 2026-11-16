@@ -70,6 +70,9 @@ static RepoList g_repos;
 static int g_selected;
 enum { FILTER_ALL = 0, FILTER_UPDATES, FILTER_INSTALLED, FILTER_NOT_INSTALLED };
 static int g_filter;
+static HbPackage* g_visible[HBPKG_MAX_PACKAGES];
+static int g_visible_count;
+static bool g_visible_dirty = true;
 static char g_marked[HBPKG_MAX_PACKAGES][64];
 static int g_marked_count;
 enum { SORT_NAME = 0, SORT_AUTHOR, SORT_INSTALLED, SORT_UPDATED };
@@ -291,21 +294,60 @@ static bool update_available(const HbPackage* package) {
     return false;
 }
 
+typedef struct {
+    bool checked;
+    bool installed;
+    bool update;
+} InstalledState;
+
+static InstalledState g_installed[HBPKG_MAX_PACKAGES];
+
+static void invalidate_visible(void) {
+    g_visible_dirty = true;
+    memset(g_installed, 0, sizeof(g_installed));
+}
+
+static const InstalledState* package_state(const HbPackage* package) {
+    const int index = (int)(package - g_manifest.items);
+    if (index < 0 || index >= g_manifest.count)
+        return NULL;
+    if (!g_installed[index].checked) {
+        g_installed[index].installed = is_installed(package);
+        g_installed[index].update =
+            g_installed[index].installed && update_available(package);
+        g_installed[index].checked = true;
+    }
+    return &g_installed[index];
+}
+
+static int compare_packages(const void* left, const void* right);
+
+static void rebuild_visible(void) {
+    if (!g_visible_dirty)
+        return;
+    g_visible_count = 0;
+    for (int i = 0; i < g_manifest.count; i++) {
+        const InstalledState* state = package_state(&g_manifest.items[i]);
+        bool match = true;
+        switch (g_filter) {
+            case FILTER_UPDATES: match = state->update; break;
+            case FILTER_INSTALLED: match = state->installed; break;
+            case FILTER_NOT_INSTALLED: match = !state->installed; break;
+            default: break;
+        }
+        if (match)
+            g_visible[g_visible_count++] = &g_manifest.items[i];
+    }
+    qsort(g_visible, (size_t)g_visible_count, sizeof(g_visible[0]), compare_packages);
+    g_visible_dirty = false;
+}
+
 static const char* filter_name(void) {
     switch (g_filter) {
         case FILTER_UPDATES: return "Updates";
         case FILTER_INSTALLED: return "Installed";
         case FILTER_NOT_INSTALLED: return "Not installed";
         default: return "All";
-    }
-}
-
-static bool filter_matches(const HbPackage* package) {
-    switch (g_filter) {
-        case FILTER_UPDATES: return update_available(package);
-        case FILTER_INSTALLED: return is_installed(package);
-        case FILTER_NOT_INSTALLED: return !is_installed(package);
-        default: return true;
     }
 }
 
@@ -335,12 +377,8 @@ static void clear_marks(void) {
 }
 
 static int visible_count(void) {
-    int count = 0;
-    for (int i = 0; i < g_manifest.count; i++) {
-        if (filter_matches(&g_manifest.items[i]))
-            count++;
-    }
-    return count;
+    rebuild_visible();
+    return g_visible_count;
 }
 
 static unsigned long long package_timestamp(const HbPackage* package, bool installed) {
@@ -375,14 +413,8 @@ static int compare_packages(const void* left, const void* right) {
 }
 
 static HbPackage* visible_package(int index) {
-    HbPackage* matches[HBPKG_MAX_PACKAGES];
-    int count = 0;
-    for (int i = 0; i < g_manifest.count; i++) {
-        if (filter_matches(&g_manifest.items[i]))
-            matches[count++] = &g_manifest.items[i];
-    }
-    qsort(matches, (size_t)count, sizeof(matches[0]), compare_packages);
-    return index >= 0 && index < count ? matches[index] : NULL;
+    rebuild_visible();
+    return index >= 0 && index < g_visible_count ? g_visible[index] : NULL;
 }
 
 static const char* sort_name(void) {
@@ -516,12 +548,14 @@ static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selec
     ui_text_truncated(ui, x + 14, y + 181, display_version(package), 12, COLOR_MUTED,
                       width - 28);
 
-    if (is_installed(package)) {
-        const bool update = update_available(package);
-        const char* label = update ? "Update" : "Installed";
-        const int label_width = ui_text_width(ui, label, 13);
-        ui_text(ui, x + width - 14 - label_width, y + 204, label, 13,
-                update ? COLOR_ACCENT : COLOR_GREEN);
+    {
+        const InstalledState* state = package_state(package);
+        if (state && state->installed) {
+            const char* label = state->update ? "Update" : "Installed";
+            const int label_width = ui_text_width(ui, label, 13);
+            ui_text(ui, x + width - 14 - label_width, y + 204, label, 13,
+                    state->update ? COLOR_ACCENT : COLOR_GREEN);
+        }
     }
 }
 
@@ -613,24 +647,29 @@ static void draw_shop_content(Ui* ui) {
 
         ui_text_truncated(ui, 958, 100, selected->title, 25, COLOR_TEXT, 268);
         ui_text_truncated(ui, 958, 136, selected->author, 14, COLOR_MUTED, 268);
-        if (is_installed(selected)) {
-            const bool update = update_available(selected);
-            ui_text(ui, 958, 164, update ? "Update available" : "Installed", 14,
-                    update ? COLOR_ACCENT : COLOR_GREEN);
+        {
+            const InstalledState* selected_state = package_state(selected);
+            if (selected_state && selected_state->installed) {
+                ui_text(ui, 958, 164, selected_state->update ? "Update available" : "Installed",
+                        14, selected_state->update ? COLOR_ACCENT : COLOR_GREEN);
+            }
         }
         ui_text(ui, 958, 188, display_version(selected), 15, COLOR_MUTED);
-        if (is_installed(selected)) {
-            char version[64];
-            char hash[65];
-            char file[512];
-            unsigned long long installed_at = 0;
-            if (read_state(selected, version, sizeof(version), hash, sizeof(hash),
-                           file, sizeof(file), &installed_at, NULL) && installed_at) {
-                char date[64];
-                format_installed_time(installed_at, date, sizeof(date));
-                char line[96];
-                snprintf(line, sizeof(line), "Installed %s", date);
-                ui_text_truncated(ui, 958, 212, line, 12, COLOR_MUTED, 268);
+        {
+            const InstalledState* selected_state = package_state(selected);
+            if (selected_state && selected_state->installed) {
+                char version[64];
+                char hash[65];
+                char file[512];
+                unsigned long long installed_at = 0;
+                if (read_state(selected, version, sizeof(version), hash, sizeof(hash),
+                               file, sizeof(file), &installed_at, NULL) && installed_at) {
+                    char date[64];
+                    format_installed_time(installed_at, date, sizeof(date));
+                    char line[96];
+                    snprintf(line, sizeof(line), "Installed %s", date);
+                    ui_text_truncated(ui, 958, 212, line, 12, COLOR_MUTED, 268);
+                }
             }
         }
 
@@ -639,12 +678,15 @@ static void draw_shop_content(Ui* ui) {
 
         ui_text_truncated(ui, 958, 522, selected->target, 12, COLOR_MUTED, 268);
         const int button_y = 556;
-        const char* primary_label = is_installed(selected)
-                                       ? (update_available(selected) ? "A  Update" : "A  Reinstall")
+        const InstalledState* selected_state = package_state(selected);
+        const bool selected_installed = selected_state && selected_state->installed;
+        const bool selected_update = selected_state && selected_state->update;
+        const char* primary_label = selected_installed
+                                       ? (selected_update ? "A  Update" : "A  Reinstall")
                                        : "A  Install";
         const int primary_width = ui_text_width(ui, primary_label, 15);
         ui_rect(ui, 958, button_y, 268, 42,
-                is_installed(selected) ? COLOR_ACCENT_DIM : COLOR_ACCENT);
+                selected_installed ? COLOR_ACCENT_DIM : COLOR_ACCENT);
         ui_text(ui, 958 + (268 - primary_width) / 2, button_y + 13,
                 primary_label, 15, COLOR_TEXT);
     }
@@ -1545,6 +1587,7 @@ static void install_package(const HbPackage* package, PadState* pad) {
         installed_at = now;
     updated_at = now;
     write_state(package, hash, installed_file, installed_at, updated_at);
+    invalidate_visible();
     update_shortcut(package, installed_file);
     if (strcmp(package->version, "latest") == 0 ||
         strcmp(package->version, "test") == 0 ||
@@ -1645,6 +1688,7 @@ static void remove_package(const HbPackage* package) {
     char path[512];
     if (state_path(package, path, sizeof(path)) == 0)
         remove(path);
+    invalidate_visible();
     shortcuts_remove(SHORTCUTS_PATH, package->name);
     clamp_selection();
     set_status("Removed %s.", package->title);
@@ -1778,6 +1822,7 @@ static bool batch_install(const PreparedPackage* prepared) {
     if (!installed_at)
         installed_at = now;
     write_state(package, prepared->hash, installed_file, installed_at, now);
+    invalidate_visible();
     update_shortcut(package, installed_file);
     return true;
 }
@@ -1916,6 +1961,7 @@ static void context_action(void) {
             } else {
                 g_sort_reverse = true;
             }
+            invalidate_visible();
             g_selected = 0;
             g_scroll_page = 0;
             clamp_selection();
@@ -2051,6 +2097,7 @@ static void refresh_catalogs(bool fetch) {
     int failures = 0;
     g_manifest.count = 0;
     g_manifest_error[0] = '\0';
+    invalidate_visible();
     path_mkdirs(REPO_CACHE_DIR);
     g_catalog_log = fopen(CACHE_DIR "/catalog.log", "w");
 
@@ -2699,6 +2746,7 @@ int main(void) {
             }
         } else if ((down & HidNpadButton_Y) || key_remove) {
             g_filter = (g_filter + 1) % 4;
+            invalidate_visible();
             g_selected = 0;
             g_scroll_page = 0;
             clamp_selection();
