@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "release.h"
 
-#define JSMN_STRICT
-#define JSMN_STATIC
-#include "jsmn.h"
+#include "json_util.h"
 
 #include "github.h"
 #include "http.h"
@@ -22,82 +20,11 @@ static int fail(char* err, size_t err_size, const char* message) {
     return -1;
 }
 
-static int token_string(const char* json, const jsmntok_t* token, char* out, size_t out_size) {
-    if (!token || token->end < token->start || !out_size)
-        return -1;
-    if (token->type != JSMN_STRING && token->type != JSMN_PRIMITIVE)
-        return -1;
-    const size_t length = (size_t)(token->end - token->start);
-    if (length >= out_size)
-        return -1;
-    memcpy(out, json + token->start, length);
-    out[length] = '\0';
-    return 0;
-}
-
-static int token_skip(const jsmntok_t* tokens, int index, int count) {
-    if (index < 0 || index >= count)
-        return count;
-    int position = index + 1;
-    if (tokens[index].type == JSMN_OBJECT) {
-        for (int pair = 0; pair < tokens[index].size; pair++) {
-            position = token_skip(tokens, position, count);
-            position = token_skip(tokens, position, count);
-        }
-    } else if (tokens[index].type == JSMN_ARRAY) {
-        for (int child = 0; child < tokens[index].size; child++)
-            position = token_skip(tokens, position, count);
-    }
-    return position;
-}
-
-static int object_get(const char* json, const jsmntok_t* tokens, int count, int object,
-                      const char* key, char* out, size_t out_size) {
-    if (object < 0 || object >= count || tokens[object].type != JSMN_OBJECT)
-        return -1;
-    int position = object + 1;
-    for (int pair = 0; pair < tokens[object].size && position < count; pair++) {
-        const int value = position + 1;
-        char name[64];
-        if (token_string(json, &tokens[position], name, sizeof(name)) == 0 &&
-            strcmp(name, key) == 0)
-            return token_string(json, &tokens[value], out, out_size);
-        position = token_skip(tokens, value, count);
-    }
-    return -1;
-}
-
-static int array_get(const char* json, const jsmntok_t* tokens, int count, int object,
-                     const char* key) {
-    if (object < 0 || object >= count || tokens[object].type != JSMN_OBJECT)
-        return -1;
-    int position = object + 1;
-    for (int pair = 0; pair < tokens[object].size && position < count; pair++) {
-        const int value = position + 1;
-        char name[64];
-        if (token_string(json, &tokens[position], name, sizeof(name)) == 0 &&
-            strcmp(name, key) == 0 && tokens[value].type == JSMN_ARRAY)
-            return value;
-        position = token_skip(tokens, value, count);
-    }
-    return -1;
-}
-
-static int object_get_object(const char* json, const jsmntok_t* tokens, int count, int object,
-                             const char* key) {
-    if (object < 0 || object >= count || tokens[object].type != JSMN_OBJECT)
-        return -1;
-    int position = object + 1;
-    for (int pair = 0; pair < tokens[object].size && position < count; pair++) {
-        const int value = position + 1;
-        char name[64];
-        if (token_string(json, &tokens[position], name, sizeof(name)) == 0 &&
-            strcmp(name, key) == 0 && tokens[value].type == JSMN_OBJECT)
-            return value;
-        position = token_skip(tokens, value, count);
-    }
-    return -1;
-}
+#define token_string json_token_string
+#define token_skip json_token_skip
+#define object_get json_object_get
+#define array_get json_array_get
+#define object_get_object json_object_get_object
 
 static int safe_asset_name(const char* name) {
     if (!name[0] || strchr(name, '/') || strchr(name, '\\') ||

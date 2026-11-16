@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "repos.h"
 
-#define JSMN_STRICT
-#define JSMN_STATIC
-#include "jsmn.h"
+#include "json_util.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -19,32 +17,8 @@ static int fail(char* err, size_t err_size, const char* message) {
     return -1;
 }
 
-static int token_skip(const jsmntok_t* tokens, int index, int count) {
-    if (index < 0 || index >= count)
-        return count;
-    int position = index + 1;
-    if (tokens[index].type == JSMN_OBJECT) {
-        for (int pair = 0; pair < tokens[index].size; pair++) {
-            position = token_skip(tokens, position, count);
-            position = token_skip(tokens, position, count);
-        }
-    } else if (tokens[index].type == JSMN_ARRAY) {
-        for (int child = 0; child < tokens[index].size; child++)
-            position = token_skip(tokens, position, count);
-    }
-    return position;
-}
-
-static int token_string(const char* json, const jsmntok_t* token, char* out, size_t out_size) {
-    if (!token || token->type != JSMN_STRING || token->end < token->start || !out_size)
-        return -1;
-    const size_t length = (size_t)(token->end - token->start);
-    if (length >= out_size)
-        return -1;
-    memcpy(out, json + token->start, length);
-    out[length] = '\0';
-    return 0;
-}
+#define token_string json_token_string
+#define token_skip json_token_skip
 
 static int valid_url(const char* url) {
     if (strncmp(url, "https://", 8) != 0)
