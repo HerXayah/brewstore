@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "manifest.h"
+#include "path_safe.h"
 
 #define JSMN_STRICT
 #define JSMN_STATIC
@@ -39,6 +40,8 @@ static int read_hex4(const char* text, unsigned* value) {
 }
 
 static int utf8_append(char* out, size_t out_size, size_t* used, unsigned codepoint) {
+    if (codepoint == 0)
+        return -1;
     unsigned char bytes[4];
     int count;
     if (codepoint <= 0x7f) {
@@ -209,25 +212,7 @@ static int safe_name(const char* name) {
 }
 
 static int safe_relative(const char* path) {
-    if (!path[0] || path[0] == '/')
-        return 0;
-    const char* part = path;
-    while (*part) {
-        const char* end = strchr(part, '/');
-        const size_t length = end ? (size_t)(end - part) : strlen(part);
-        if (length == 2 && part[0] == '.' && part[1] == '.')
-            return 0;
-        if (length == 0)
-            return 0;
-        for (size_t i = 0; i < length; i++) {
-            if (part[i] == '\\' || part[i] == ':')
-                return 0;
-        }
-        if (!end)
-            break;
-        part = end + 1;
-    }
-    return 1;
+    return path_safe_relative(path) ? 1 : 0;
 }
 
 static int normalize_target(char* target, size_t target_size) {

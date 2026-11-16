@@ -110,7 +110,7 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
             while (path_length > 12 && settings->default_install_path[path_length - 1] == '/')
                 settings->default_install_path[--path_length] = '\0';
             if (!settings_valid_path(settings->default_install_path))
-                return fail(err, err_size, "defaultInstallPath must be under sdmc:/switch");
+                return fail(err, err_size, "defaultInstallPath must be under sdmc:/switch or sdmc:/brewstore");
             position = value + 1;
             continue;
         }

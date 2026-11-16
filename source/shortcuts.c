@@ -34,8 +34,12 @@ int shortcuts_set(const char* path, const char* package, const char* title,
     if (!nro || !nro[0])
         return shortcuts_remove(path, package);
     if (strncmp(nro, "sdmc:/", 6) != 0 || strlen(nro) >= 512 ||
-        strstr(nro, "\r") || strstr(nro, "\n"))
+        strstr(nro, "..") || strstr(nro, "\r") || strstr(nro, "\n"))
         return -1;
+    for (const char* p = nro; *p; p++) {
+        if ((unsigned char)*p < 0x20 || (unsigned char)*p == 0x7f)
+            return -1;
+    }
     const size_t nro_length = strlen(nro);
     if (nro_length < 4 || strcasecmp(nro + nro_length - 4, ".nro") != 0)
         return -1;

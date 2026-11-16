@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // brewstore: a homebrew package browser for SD-card NROs and assets.
 // It downloads GitHub archives, verifies optional SHA-256, and extracts them
-// under sdmc:/switch. It never handles NSP/NAND content.
+// under sdmc:/switch or sdmc:/brewstore/apps. It never handles NSP/NAND content.
 #include <switch.h>
 
 #include <ctype.h>
@@ -852,7 +852,7 @@ static void draw_settings(Ui* ui) {
 
 static void edit_default_path(void) {
     char path[256];
-    if (!prompt_text("Default install path", "Folder under sdmc:/switch",
+    if (!prompt_text("Default install path", "Folder under sdmc:/switch or sdmc:/brewstore",
                      g_settings.default_install_path, path, sizeof(path))) {
         set_status("Path edit cancelled.");
         draw_settings(g_ui);
@@ -862,7 +862,7 @@ static void edit_default_path(void) {
     while (path_length > 12 && path[path_length - 1] == '/')
         path[--path_length] = '\0';
     if (!settings_valid_path(path)) {
-        set_status("Path must be under sdmc:/switch.");
+        set_status("Path must be under sdmc:/switch or sdmc:/brewstore.");
         draw_settings(g_ui);
         return;
     }
@@ -1627,13 +1627,8 @@ static void remove_package(const HbPackage* package) {
             return;
         }
         prune_empty_parents(marker);
-    } else if (strcmp(package->target, "sdmc:/switch") == 0 ||
-               strcmp(package->target, "sdmc:/") == 0) {
-        set_status("Refusing to delete the SD card root or /switch itself.");
-        draw_shop(g_ui);
-        return;
-    } else if (path_remove_tree(package->target) != 0) {
-        set_status("Could not remove %s.", package->title);
+    } else {
+        set_status("No file list for %s; remove it manually.", package->title);
         draw_shop(g_ui);
         return;
     }
@@ -2414,12 +2409,36 @@ static void rewrite_installed_paths(void) {
     closedir(dir);
 }
 
+static bool move_legacy_entry(const char* name) {
+    char old_path[512];
+    char new_path[512];
+    snprintf(old_path, sizeof(old_path), "%s/%s", LEGACY_BREWSTORE_ROOT, name);
+    snprintf(new_path, sizeof(new_path), "%s/%s", BREWSTORE_ROOT, name);
+    if (access(new_path, F_OK) == 0 || access(old_path, F_OK) != 0)
+        return false;
+    return rename(old_path, new_path) == 0;
+}
+
 static void migrate_brewstore_root(void) {
-    if (access(BREWSTORE_ROOT, F_OK) == 0)
-        return;
     if (access(LEGACY_BREWSTORE_ROOT, F_OK) != 0)
         return;
-    if (rename(LEGACY_BREWSTORE_ROOT, BREWSTORE_ROOT) != 0)
+
+    bool moved = false;
+    if (access(BREWSTORE_ROOT, F_OK) != 0) {
+        if (rename(LEGACY_BREWSTORE_ROOT, BREWSTORE_ROOT) != 0)
+            return;
+        moved = true;
+    } else {
+        const char* entries[] = {
+            "packages.json", "test-repo.json", "repos.json", "settings.json",
+            "cache", "installed", "apps"
+        };
+        for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+            if (move_legacy_entry(entries[i]))
+                moved = true;
+        }
+    }
+    if (!moved)
         return;
     rewrite_installed_paths();
     replace_file_prefix(SHORTCUTS_PATH, "sdmc:/switch/brewstore/apps/",

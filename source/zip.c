@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "zip.h"
+#include "path_safe.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -87,24 +88,17 @@ int path_remove_tree(const char* path) {
 }
 
 static int safe_relative(const char* path) {
-    if (!path[0] || path[0] == '/' || strchr(path, '\\') || strchr(path, ':'))
-        return 0;
-    const char* part = path;
-    while (*part) {
-        const char* end = strchr(part, '/');
-        const size_t length = end ? (size_t)(end - part) : strlen(part);
-        if (length == 0 || (length == 2 && part[0] == '.' && part[1] == '.'))
-            return 0;
-        part = end ? end + 1 : part + length;
-    }
-    return 1;
+    return path_safe_relative(path) ? 1 : 0;
 }
 
 static int entry_name(unzFile archive, char* name, size_t name_size) {
     unz_file_info info;
     if (unzGetCurrentFileInfo(archive, &info, name, (uLong)name_size, NULL, 0, NULL, 0) != UNZ_OK)
         return -1;
-    return info.size_filename < name_size ? 0 : -1;
+    if (info.size_filename >= name_size)
+        return -1;
+    name[info.size_filename] = '\0';
+    return 0;
 }
 
 static int detect_root(unzFile archive, char* root, size_t root_size) {

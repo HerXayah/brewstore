@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // brewstore package manifest: a small JSON file listing GitHub archives to install
-// under sdmc:/switch. Deliberately no installer, no system paths, no NAND.
+// under sdmc:/switch or the configured app root. Deliberately no installer, no NAND.
 #pragma once
 
 #include <stdbool.h>
