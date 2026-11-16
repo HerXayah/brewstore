@@ -11,8 +11,9 @@
 #include <string.h>
 
 #define SETTINGS_MAX 8192
-#define DEFAULT_INSTALL_PATH "sdmc:/switch/brewstore/apps"
+#define DEFAULT_INSTALL_PATH "sdmc:/brewstore/apps"
 #define LEGACY_INSTALL_PATH "sdmc:/switch"
+#define LEGACY_BREWSTORE_PATH "sdmc:/switch/brewstore/apps"
 
 static int fail(char* err, size_t err_size, const char* message) {
     if (err && err_size)
@@ -21,9 +22,13 @@ static int fail(char* err, size_t err_size, const char* message) {
 }
 
 int settings_valid_path(const char* path) {
-    if (!path || strncmp(path, "sdmc:/switch", 12) != 0)
+    if (!path)
         return 0;
-    if (path[12] && path[12] != '/')
+    const int switch_root = strncmp(path, "sdmc:/switch", 12) == 0 &&
+                            (!path[12] || path[12] == '/');
+    const int brewstore_root = strncmp(path, "sdmc:/brewstore", 15) == 0 &&
+                               (!path[15] || path[15] == '/');
+    if (!switch_root && !brewstore_root)
         return 0;
     if (strstr(path, "..") || strchr(path, '\\'))
         return 0;
@@ -122,7 +127,8 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
         }
         position = value + 1;
     }
-    if (strcmp(settings->default_install_path, LEGACY_INSTALL_PATH) == 0)
+    if (strcmp(settings->default_install_path, LEGACY_INSTALL_PATH) == 0 ||
+        strcmp(settings->default_install_path, LEGACY_BREWSTORE_PATH) == 0)
         snprintf(settings->default_install_path, sizeof(settings->default_install_path),
                  "%s", DEFAULT_INSTALL_PATH);
     return 0;

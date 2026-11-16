@@ -28,15 +28,17 @@
 #include "version.h"
 #include "zip.h"
 
-#define MANIFEST_PATH "sdmc:/switch/brewstore/packages.json"
-#define CACHE_DIR "sdmc:/switch/brewstore/cache"
+#define BREWSTORE_ROOT "sdmc:/brewstore"
+#define LEGACY_BREWSTORE_ROOT "sdmc:/switch/brewstore"
+#define MANIFEST_PATH BREWSTORE_ROOT "/packages.json"
+#define CACHE_DIR BREWSTORE_ROOT "/cache"
 #define ICON_DIR CACHE_DIR "/icons"
 #define REPO_CACHE_DIR CACHE_DIR "/repos"
-#define REPOS_PATH "sdmc:/switch/brewstore/repos.json"
-#define TEST_REPO_PATH "sdmc:/switch/brewstore/test-repo.json"
-#define INSTALLED_DIR "sdmc:/switch/brewstore/installed"
+#define REPOS_PATH BREWSTORE_ROOT "/repos.json"
+#define TEST_REPO_PATH BREWSTORE_ROOT "/test-repo.json"
+#define INSTALLED_DIR BREWSTORE_ROOT "/installed"
 #define README_DIR CACHE_DIR "/readme"
-#define SETTINGS_PATH "sdmc:/switch/brewstore/settings.json"
+#define SETTINGS_PATH BREWSTORE_ROOT "/settings.json"
 #define SHORTCUTS_PATH "sdmc:/switch/shortcuts.txt"
 #define DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json"
 #define VISIBLE_COLUMNS 3
@@ -1078,6 +1080,38 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     ui_end(ui);
 }
 
+static void draw_uninstall_progress(Ui* ui, const char* title, int current, int total,
+                                    const char* path) {
+    if (!ui)
+        return;
+    ui_begin(ui);
+    ui_clear(ui, COLOR_BACKGROUND);
+    ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
+    ui_text(ui, 24, 14, "Uninstalling", 24, COLOR_TEXT);
+    ui_text_truncated(ui, 28, 96, title, 20, COLOR_TEXT, UI_WIDTH - 56);
+    char step[320];
+    const char* base = path ? strrchr(path, '/') : NULL;
+    base = base ? base + 1 : path;
+    if (base && base[0])
+        snprintf(step, sizeof(step), "%d / %d  %s", current, total, base);
+    else
+        snprintf(step, sizeof(step), "%d / %d", current, total);
+    ui_text_truncated(ui, 28, 132, step, 16, COLOR_MUTED, UI_WIDTH - 56);
+    const int bar_x = 28;
+    const int bar_y = 340;
+    const int bar_width = UI_WIDTH - 56;
+    const int bar_height = 18;
+    ui_rect(ui, bar_x, bar_y, bar_width, bar_height, COLOR_CARD);
+    int percent = total > 0 ? current * 100 / total : 0;
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    ui_rect(ui, bar_x, bar_y, bar_width * percent / 100, bar_height, COLOR_ACCENT);
+    char line[64];
+    snprintf(line, sizeof(line), "%d%%", percent);
+    ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
+    ui_end(ui);
+}
+
 typedef struct {
     const HbPackage* package;
     FILE* list;
@@ -1525,7 +1559,7 @@ static void prune_empty_parents(char* path) {
     while (slash) {
         *slash = '\0';
         if (strcmp(path, "sdmc:") == 0 || strcmp(path, "sdmc:/") == 0 ||
-            strcmp(path, "sdmc:/switch") == 0)
+            strcmp(path, "sdmc:/switch") == 0 || strcmp(path, "sdmc:/brewstore") == 0)
             break;
         if (rmdir(path) != 0)
             break;
@@ -1539,7 +1573,21 @@ static bool remove_file_list(const HbPackage* package) {
     FILE* list = fopen(list_path, "rb");
     if (!list)
         return false;
+
     char line[1024];
+    int total = 0;
+    while (fgets(line, sizeof(line), list)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "sdmc:/", 6) == 0 && !strstr(line, "..") &&
+            strcmp(line, "sdmc:/") != 0)
+            total++;
+    }
+    rewind(list);
+    draw_uninstall_progress(g_ui, package->title, 0, total, NULL);
+    int done = 0;
+    int stride = total / 50;
+    if (stride < 1)
+        stride = 1;
     while (fgets(line, sizeof(line), list)) {
         line[strcspn(line, "\r\n")] = '\0';
         if (strncmp(line, "sdmc:/", 6) != 0 || strstr(line, "..") ||
@@ -1549,6 +1597,9 @@ static bool remove_file_list(const HbPackage* package) {
         snprintf(path, sizeof(path), "%s", line);
         remove(path);
         prune_empty_parents(path);
+        done++;
+        if (done == total || done % stride == 0)
+            draw_uninstall_progress(g_ui, package->title, done, total, line);
     }
     fclose(list);
     remove(list_path);
@@ -2314,6 +2365,67 @@ static void move_selection(int delta) {
     g_scroll_page = g_selected / VISIBLE_COUNT;
 }
 
+static void replace_file_prefix(const char* path, const char* old_prefix,
+                               const char* new_prefix) {
+    FILE* input = fopen(path, "rb");
+    if (!input)
+        return;
+    char temporary[768];
+    snprintf(temporary, sizeof(temporary), "%.760s.tmp", path);
+    FILE* output = fopen(temporary, "wb");
+    if (!output) {
+        fclose(input);
+        return;
+    }
+    char line[2048];
+    while (fgets(line, sizeof(line), input)) {
+        char* hit = strstr(line, old_prefix);
+        if (hit) {
+            const size_t before = (size_t)(hit - line);
+            fwrite(line, 1, before, output);
+            fputs(new_prefix, output);
+            fputs(hit + strlen(old_prefix), output);
+        } else {
+            fputs(line, output);
+        }
+    }
+    fclose(input);
+    if (fclose(output) != 0) {
+        remove(temporary);
+        return;
+    }
+    remove(path);
+    if (rename(temporary, path) != 0)
+        remove(temporary);
+}
+
+static void rewrite_installed_paths(void) {
+    DIR* dir = opendir(INSTALLED_DIR);
+    if (!dir)
+        return;
+    struct dirent* entry;
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.')
+            continue;
+        char path[1024];
+        snprintf(path, sizeof(path), INSTALLED_DIR "/%s", entry->d_name);
+        replace_file_prefix(path, "sdmc:/switch/brewstore/apps/", "sdmc:/brewstore/apps/");
+    }
+    closedir(dir);
+}
+
+static void migrate_brewstore_root(void) {
+    if (access(BREWSTORE_ROOT, F_OK) == 0)
+        return;
+    if (access(LEGACY_BREWSTORE_ROOT, F_OK) != 0)
+        return;
+    if (rename(LEGACY_BREWSTORE_ROOT, BREWSTORE_ROOT) != 0)
+        return;
+    rewrite_installed_paths();
+    replace_file_prefix(SHORTCUTS_PATH, "sdmc:/switch/brewstore/apps/",
+                        "sdmc:/brewstore/apps/");
+}
+
 int main(void) {
     Ui ui;
     char error[256] = {0};
@@ -2327,12 +2439,13 @@ int main(void) {
     padInitializeDefault(&pad);
     g_pad = &pad;
 
+    migrate_brewstore_root();
+    path_mkdirs(BREWSTORE_ROOT);
     path_mkdirs(CACHE_DIR);
     path_mkdirs(ICON_DIR);
     path_mkdirs(INSTALLED_DIR);
     path_mkdirs(REPO_CACHE_DIR);
     path_mkdirs(README_DIR);
-    path_mkdirs("sdmc:/switch/brewstore");
 
     if (settings_load(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0)
         snprintf(g_status, sizeof(g_status), "settings.json: %s", error);
