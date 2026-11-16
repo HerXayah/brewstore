@@ -959,7 +959,7 @@ static void draw_download_progress(Ui* ui, const char* title,
         snprintf(line, sizeof(line), "%.1f MB", (double)received / (1024.0 * 1024.0));
         ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
     }
-    ui_text(ui, 28, 680, "B cancel   + exit", 13, COLOR_MUTED);
+    ui_text(ui, 28, 680, "B cancel", 13, COLOR_MUTED);
     ui_end(ui);
 }
 
@@ -1012,11 +1012,10 @@ static int run_download(DownloadJob* job, PadState* pad) {
         HidKeyboardState keyboard;
         memset(&keyboard, 0, sizeof(keyboard));
         hidGetKeyboardStates(&keyboard, 1);
-        if ((down & (HidNpadButton_B | HidNpadButton_Plus)) ||
+        if ((down & HidNpadButton_B) ||
             hidKeyboardStateGetKey(&keyboard, HidKeyboardKey_Escape)) {
             job->cancel = true;
-            if ((down & HidNpadButton_Plus) ||
-                hidKeyboardStateGetKey(&keyboard, HidKeyboardKey_Escape))
+            if (hidKeyboardStateGetKey(&keyboard, HidKeyboardKey_Escape))
                 g_quit = true;
         }
         const u64 now = svcGetSystemTick();
@@ -1386,7 +1385,7 @@ static void install_package(const HbPackage* package, PadState* pad) {
         install_redraw();
         if (release_latest_asset(package->url, package->asset, CACHE_DIR "/release.json",
                                  url, sizeof(url), asset_name, sizeof(asset_name),
-                                 &asset_size, error, sizeof(error)) != 0) {
+                                 &asset_size, NULL, 0, error, sizeof(error)) != 0) {
             set_status("Release failed: %s", error);
             install_redraw();
             return;
@@ -1615,7 +1614,7 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
         if (release_latest_asset(package->url, package->asset, CACHE_DIR "/release.json",
                                  url, sizeof(url), prepared->asset_name,
                                  sizeof(prepared->asset_name), &asset_size,
-                                 error, sizeof(error)) != 0) {
+                                 NULL, 0, error, sizeof(error)) != 0) {
             snprintf(prepared->error, sizeof(prepared->error), "%s", error);
             return false;
         }
@@ -2431,8 +2430,6 @@ int main(void) {
         }
 
         if (g_settings_screen) {
-            if (down & HidNpadButton_Plus)
-                break;
             bool changed = false;
             if ((down & (HidNpadButton_B | HidNpadButton_ZL)) || key_exit) {
                 g_ignore_b = true;
@@ -2457,8 +2454,6 @@ int main(void) {
         }
 
         if (g_repo_manager) {
-            if (down & HidNpadButton_Plus)
-                break;
             bool changed = false;
             if ((down & (HidNpadButton_B | HidNpadButton_ZR)) || key_exit || key_manager) {
                 g_ignore_b = true;
@@ -2506,7 +2501,7 @@ int main(void) {
                 g_ignore_b = false;
             }
         }
-        if ((down & HidNpadButton_Plus) || (b_down && !swallow_b) || key_exit)
+        if ((b_down && !swallow_b) || key_exit)
             break;
 
         if ((down & HidNpadButton_ZL) || key_settings) {

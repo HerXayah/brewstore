@@ -10,4 +10,5 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
                          const char* cache_path, char* asset_url, size_t url_size,
                          char* asset_name, size_t name_size,
                          unsigned long long* asset_size,
+                         char* digest, size_t digest_size,
                          char* err, size_t err_size);
