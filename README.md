@@ -21,6 +21,10 @@ Same goes for using custom repositories.
 - Boot up kaiHEN
 - Profit!
 
+## Dev?
+
+- Head over to [brewstore-repo](https://github.com/HerXayah/brewstore-repo) to add your app!
+
 ## Build
 
 ```sh
