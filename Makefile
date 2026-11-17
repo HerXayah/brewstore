@@ -16,7 +16,7 @@ DATA		:=	data
 INCLUDES	:=	include
 APP_TITLE	:=	brewstore
 APP_AUTHOR	:=	Miella Selene / Xayah
-APP_VERSION	:=	0.5.0
+APP_VERSION	:=	1.0
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -96,7 +96,7 @@ DEPENDS	:=	$(OFILES:.o=.d)
 all	:	$(OUTPUT).nro
 
 $(OUTPUT).nro	:	$(OUTPUT).elf $(OUTPUT).nacp
-	@elf2nro $< $@ --nacp=$(OUTPUT).nacp
+	@elf2nro $< $@ --nacp=$(OUTPUT).nacp --icon=$(TOPDIR)/icon.jpg
 
 $(OUTPUT).elf	:	$(OFILES)
 

@@ -7,7 +7,19 @@ Currently uses a fork of [hbmenu](https://github.com/ouncebrew/ounce-hbmenu/pull
 ## Disclaimer
 
 I am not responsible for any bricks, lost data or anything else.  
-Use this tool on you own responsibility.
+Use this tool on you own responsibility.  
+Same goes for using custom repositories.  
+
+## Installation
+
+- Grab the modified HB-Menu
+  - https://github.com/HerXayah/brewstore-repo/releases/download/main/hbmenu.nro
+- Replace the original `hbmenu.nro` in your kaiHEN directory on PC
+- Put `brewloader.nro` into programs in your kaiHEN directory on PC
+- Load up kaiHEN
+- Version string should say ``v1337.69420.l33t``
+- Boot up kaiHEN
+- Profit!
 
 ## Build
 
