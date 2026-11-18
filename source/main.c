@@ -77,7 +77,7 @@ static int g_visible_count;
 static bool g_visible_dirty = true;
 static char g_marked[HBPKG_MAX_PACKAGES][64];
 static int g_marked_count;
-enum { SORT_NAME = 0, SORT_AUTHOR, SORT_INSTALLED, SORT_UPDATED };
+enum { SORT_NAME = 0, SORT_AUTHOR, SORT_UPDATED };
 static int g_sort;
 static bool g_sort_reverse;
 static bool g_context_menu;
@@ -419,8 +419,8 @@ static int compare_packages(const void* left, const void* right) {
     } else if (g_sort == SORT_AUTHOR) {
         result = strcasecmp(a->author, b->author);
     } else {
-        const unsigned long long a_time = package_timestamp(a, g_sort == SORT_INSTALLED);
-        const unsigned long long b_time = package_timestamp(b, g_sort == SORT_INSTALLED);
+        const unsigned long long a_time = package_timestamp(a, false);
+        const unsigned long long b_time = package_timestamp(b, false);
         if (a_time != b_time)
             result = a_time > b_time ? 1 : -1;
     }
@@ -439,8 +439,6 @@ static const char* sort_name(void) {
         return g_sort_reverse ? "Name Z-A" : "Name A-Z";
     if (g_sort == SORT_AUTHOR)
         return g_sort_reverse ? "Author Z-A" : "Author A-Z";
-    if (g_sort == SORT_INSTALLED)
-        return g_sort_reverse ? "Installed newest" : "Installed oldest";
     return g_sort_reverse ? "Updated newest" : "Updated oldest";
 }
 
@@ -2183,7 +2181,7 @@ static void context_action(void) {
         case 3:
             if (g_sort_reverse) {
                 g_sort_reverse = false;
-                g_sort = (g_sort + 1) % 4;
+                g_sort = (g_sort + 1) % 3;
             } else {
                 g_sort_reverse = true;
             }
