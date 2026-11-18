@@ -18,6 +18,7 @@ typedef struct {
     char release[16];
     char asset[64];
     char version[32];
+    char published[24];
     char url[512];
     char branch[64];
     char strip_prefix[128];

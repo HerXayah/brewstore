@@ -390,6 +390,12 @@ static int visible_count(void) {
 }
 
 static unsigned long long package_timestamp(const HbPackage* package, bool installed) {
+    if (!installed && package->published[0]) {
+        char* end = NULL;
+        const unsigned long long published = strtoull(package->published, &end, 10);
+        if (published && end && *end == '\0')
+            return published;
+    }
     const InstalledState* state = package_state(package);
     if (state && state->times_known)
         return installed ? state->installed_at : state->updated_at;

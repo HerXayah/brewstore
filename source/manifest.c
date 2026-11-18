@@ -218,6 +218,8 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
         if (object_get(text, tokens, count, object, "version", pkg->version,
                        sizeof(pkg->version)) != 0)
             strcpy(pkg->version, "unknown");
+        object_get(text, tokens, count, object, "published", pkg->published,
+                   sizeof(pkg->published));
         if (object_get(text, tokens, count, object, "url", pkg->url, sizeof(pkg->url)) != 0 &&
             object_get(text, tokens, count, object, "repo", pkg->url, sizeof(pkg->url)) != 0) {
             free(tokens);
