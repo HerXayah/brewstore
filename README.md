@@ -68,10 +68,6 @@ The catalog is hosted in the `brewstore-repo` Git repository. Its
 
 Each package manifest lives under `packages/<name>/manifest.json`.
 
-## Thanks to
-
-[Ouncebrew](https://github.com/ouncebrew)
-
 ## License
 
 GNU General Public License v3.0. See [LICENSE](LICENSE).
