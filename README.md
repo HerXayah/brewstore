@@ -21,6 +21,12 @@ Same goes for using custom repositories.
 - Boot up kaiHEN
 - Profit!
 
+## Update?
+
+- Press X in brewstore
+- Select ``Refresh catalogs``
+- Wait till its done
+
 ## Dev?
 
 - Head over to [brewstore-repo](https://github.com/HerXayah/brewstore-repo) to add your app!
