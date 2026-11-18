@@ -45,6 +45,7 @@
 #define VISIBLE_COLUMNS 3
 #define VISIBLE_ROWS 2
 #define VISIBLE_COUNT (VISIBLE_COLUMNS * VISIBLE_ROWS)
+#define LIST_VISIBLE_COUNT 8
 #define REPO_VISIBLE_ROWS 10
 
 #define COLOR_BACKGROUND RGBA8(12, 14, 18, 255)
@@ -89,6 +90,7 @@ static int g_batch_index;
 static int g_batch_total;
 static int g_batch_completed;
 static int g_scroll_page;
+static bool g_list_view;
 static bool g_repo_manager;
 static bool g_settings_screen;
 static int g_setting_row;
@@ -115,6 +117,10 @@ static CachedIcon g_icons[12];
 static int g_icon_count;
 static Ui* g_ui;
 static u64 g_previous_keys[4];
+
+static int view_page_size(void) {
+    return g_list_view ? LIST_VISIBLE_COUNT : VISIBLE_COUNT;
+}
 
 static void refresh_catalogs(bool fetch);
 static bool ends_with_ci(const char* text, const char* suffix);
@@ -438,7 +444,7 @@ static void clamp_selection(void) {
         g_selected = count ? count - 1 : 0;
     if (g_selected < 0)
         g_selected = 0;
-    g_scroll_page = count ? g_selected / VISIBLE_COUNT : 0;
+    g_scroll_page = count ? g_selected / view_page_size() : 0;
 }
 
 static void free_icons(void) {
@@ -603,6 +609,131 @@ static void draw_card(Ui* ui, const HbPackage* package, int x, int y, bool selec
     }
 }
 
+static void draw_scrollbar(Ui* ui, int first, int visible, int total) {
+    if (total <= visible)
+        return;
+    const int x = 912, y = 76, width = 8, height = 568;
+    int thumb_height = height * visible / total;
+    if (thumb_height < 24)
+        thumb_height = 24;
+    int max_first = total - visible;
+    if (first > max_first)
+        first = max_first;
+    if (first < 0)
+        first = 0;
+    ui_rect(ui, x, y, width, height, COLOR_PANEL);
+    const int thumb_y = y + (height - thumb_height) * first / max_first;
+    ui_rect(ui, x, thumb_y, width, thumb_height, COLOR_ACCENT);
+}
+
+static void draw_list_row(Ui* ui, const HbPackage* package, int x, int y, int width,
+                          bool selected, bool marked) {
+    const int height = 64;
+    if (selected) {
+        ui_rect(ui, x - 2, y - 2, width + 4, height + 4, COLOR_ACCENT);
+        ui_rect(ui, x, y, width, height, COLOR_CARD_HOVER);
+    } else {
+        ui_rect(ui, x, y, width, height, COLOR_CARD);
+    }
+
+    const int icon_size = 44;
+    const int icon_x = x + 10;
+    const int icon_y = y + 10;
+    ui_rect(ui, icon_x, icon_y, icon_size, icon_size, COLOR_PANEL);
+    const CachedIcon* icon = icon_for(package);
+    if (icon) {
+        ui_image(ui, icon_x, icon_y, icon_size, icon_size,
+                 icon->pixels, icon->width, icon->height);
+    } else {
+        char initial[2] = { package->title[0] ? package->title[0] : '?', '\0' };
+        const int initial_width = ui_text_width(ui, initial, 20);
+        ui_text(ui, icon_x + (icon_size - initial_width) / 2, icon_y + 12,
+                initial, 20, COLOR_MUTED);
+    }
+
+    const int text_x = x + 66;
+    const int text_width = width - 78;
+    ui_text_truncated(ui, text_x, y + 8, package->title, 16, COLOR_TEXT, text_width - 100);
+    ui_text_truncated(ui, text_x, y + 31, package->author, 11, COLOR_MUTED, text_width - 100);
+    const int version_width = ui_text_width(ui, display_version(package), 11);
+    ui_text(ui, x + width - 12 - version_width, y + 42, display_version(package), 11,
+            COLOR_MUTED);
+
+    const InstalledState* state = package_state(package);
+    if (state && state->installed) {
+        const char* label = state->update ? "Update" : "Installed";
+        const int label_width = ui_text_width(ui, label, 12);
+        ui_text(ui, x + width - 12 - label_width, y + 10, label, 12,
+                state->update ? COLOR_ACCENT : COLOR_GREEN);
+    }
+    if (marked)
+        ui_text(ui, x + width - 14, y + 28, "*", 14, COLOR_ACCENT);
+}
+
+typedef struct {
+    const char* name;
+    int count;
+    u32 colors[6];
+} ButtonTheme;
+
+static const ButtonTheme kButtonThemes[BUTTON_THEME_COUNT] = {
+    {"Light blue", 1, {RGBA8(74, 144, 184, 255)}},
+    {"Lesbian", 5, {RGBA8(213, 45, 0, 255), RGBA8(239, 118, 39, 255),
+                    RGBA8(255, 154, 86, 255), RGBA8(209, 98, 164, 255),
+                    RGBA8(181, 86, 144, 255)}},
+    {"Trans", 5, {RGBA8(91, 206, 250, 255), RGBA8(245, 169, 184, 255),
+                  RGBA8(255, 255, 255, 255), RGBA8(245, 169, 184, 255),
+                  RGBA8(91, 206, 250, 255)}},
+    {"Aromantic", 5, {RGBA8(61, 165, 66, 255), RGBA8(167, 211, 121, 255),
+                      RGBA8(255, 255, 255, 255), RGBA8(169, 169, 169, 255),
+                      RGBA8(0, 0, 0, 255)}},
+    {"Gay", 6, {RGBA8(228, 3, 3, 255), RGBA8(255, 140, 0, 255),
+                RGBA8(255, 237, 0, 255), RGBA8(0, 128, 38, 255),
+                RGBA8(0, 77, 255, 255), RGBA8(117, 7, 135, 255)}},
+    {"Bisexual", 3, {RGBA8(214, 2, 112, 255), RGBA8(155, 79, 150, 255),
+                     RGBA8(0, 56, 168, 255)}},
+    {"Pansexual", 3, {RGBA8(255, 33, 140, 255), RGBA8(255, 216, 0, 255),
+                      RGBA8(33, 177, 255, 255)}},
+    {"Nonbinary", 4, {RGBA8(255, 244, 48, 255), RGBA8(255, 255, 255, 255),
+                      RGBA8(156, 89, 209, 255), RGBA8(0, 0, 0, 255)}},
+    {"Asexual", 4, {RGBA8(0, 0, 0, 255), RGBA8(163, 163, 163, 255),
+                    RGBA8(255, 255, 255, 255), RGBA8(128, 0, 128, 255)}},
+};
+
+static const char* button_theme_name(int theme) {
+    if (theme < 0 || theme >= BUTTON_THEME_COUNT)
+        theme = DEFAULT_BUTTON_THEME;
+    return kButtonThemes[theme].name;
+}
+
+static void draw_primary_button(Ui* ui, int x, int y, int width, int height,
+                               const char* label) {
+    int theme = g_settings.button_theme;
+    if (theme < 0 || theme >= BUTTON_THEME_COUNT)
+        theme = DEFAULT_BUTTON_THEME;
+    const ButtonTheme* style = &kButtonThemes[theme];
+    for (int i = 0; i < style->count; i++) {
+        const int top = y + height * i / style->count;
+        const int bottom = y + height * (i + 1) / style->count;
+        ui_rect(ui, x, top, width, bottom - top, style->colors[i]);
+    }
+    const int text_width = ui_text_width(ui, label, 15);
+    const int text_x = x + (width - text_width) / 2;
+    const int text_y = y + 13;
+    unsigned brightest = 0;
+    for (int i = 0; i < style->count; i++) {
+        const u32 c = style->colors[i];
+        const unsigned r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+        const unsigned luma = 299 * r + 587 * g + 114 * b;
+        if (luma > brightest)
+            brightest = luma;
+    }
+    const u32 text_color = brightest > 170000
+                               ? RGBA8(12, 14, 18, 255)
+                               : RGBA8(255, 255, 255, 255);
+    ui_text(ui, text_x, text_y, label, 15, text_color);
+}
+
 static bool readme_for(HbPackage* package) {
     if (!package->readme_fallback)
         return package->description[0] != '\0';
@@ -647,9 +778,10 @@ static void draw_shop_content(Ui* ui) {
     HbPackage* selected = visible ? visible_package(g_selected) : NULL;
     if (selected)
         readme_for(selected);
+    const int page_size = view_page_size();
+    const int first = g_scroll_page * page_size;
     if (visible) {
-        const int first = g_scroll_page * VISIBLE_COUNT;
-        for (int slot = 0; slot < VISIBLE_COUNT; slot++) {
+        for (int slot = 0; slot < page_size; slot++) {
             const int index = first + slot;
             HbPackage* package = index < visible ? visible_package(index) : NULL;
             if (package)
@@ -673,19 +805,32 @@ static void draw_shop_content(Ui* ui) {
         ui_text(ui, 24, 104, "Nothing matches this filter", 26, COLOR_TEXT);
         ui_text(ui, 24, 146, "Press Y to change filter.", 16, COLOR_MUTED);
     } else {
-        const int first = g_scroll_page * VISIBLE_COUNT;
-        for (int slot = 0; slot < VISIBLE_COUNT; slot++) {
-            const int index = first + slot;
-            if (index >= visible)
-                break;
-            HbPackage* package = visible_package(index);
-            if (!package)
-                break;
-            const int column = slot % VISIBLE_COLUMNS;
-            const int row = slot / VISIBLE_COLUMNS;
-            draw_card(ui, package, 32 + column * 292,
-                      76 + row * 264, index == g_selected, is_marked(package));
+        if (g_list_view) {
+            for (int slot = 0; slot < LIST_VISIBLE_COUNT; slot++) {
+                const int index = first + slot;
+                if (index >= visible)
+                    break;
+                HbPackage* package = visible_package(index);
+                if (!package)
+                    break;
+                draw_list_row(ui, package, 24, 76 + slot * 64, 872,
+                              index == g_selected, is_marked(package));
+            }
+        } else {
+            for (int slot = 0; slot < VISIBLE_COUNT; slot++) {
+                const int index = first + slot;
+                if (index >= visible)
+                    break;
+                HbPackage* package = visible_package(index);
+                if (!package)
+                    break;
+                const int column = slot % VISIBLE_COLUMNS;
+                const int row = slot / VISIBLE_COLUMNS;
+                draw_card(ui, package, 32 + column * 292,
+                          76 + row * 264, index == g_selected, is_marked(package));
+            }
         }
+        draw_scrollbar(ui, first, page_size, visible);
 
         ui_rect(ui, 936, 76, 312, 568, COLOR_PANEL);
 
@@ -728,20 +873,16 @@ static void draw_shop_content(Ui* ui) {
         const char* primary_label = selected_installed
                                        ? (selected_update ? "A  Update" : "A  Reinstall")
                                        : "A  Install";
-        const int primary_width = ui_text_width(ui, primary_label, 15);
-        ui_rect(ui, 958, button_y, 268, 42,
-                selected_installed ? COLOR_ACCENT_DIM : COLOR_ACCENT);
-        ui_text(ui, 958 + (268 - primary_width) / 2, button_y + 13,
-                primary_label, 15, COLOR_TEXT);
+        draw_primary_button(ui, 958, button_y, 268, 42, primary_label);
     }
 
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0]) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-        ui_text(ui, 24, 696, "A install   L select   X menu   Y filter   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 696, "A install   L select   X menu   - view   Y filter   ZR repos   ZL settings   B exit",
                 12, COLOR_MUTED);
     } else {
-        ui_text(ui, 24, 682, "A install   L select   X menu   Y filter   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 682, "A install   L select   X menu   - view   Y filter   ZR repos   ZL settings   B exit",
                 13, COLOR_MUTED);
     }
 
@@ -930,11 +1071,32 @@ static void draw_settings(Ui* ui) {
                       15, g_settings.download_proxy[0] ? COLOR_ACCENT : COLOR_MUTED,
                       UI_WIDTH - 80);
 
+    if (g_setting_row == 2)
+        ui_rect(ui, 24, 224, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 234, "Button theme", 17, COLOR_TEXT);
+    ui_text(ui, 40, 260, button_theme_name(g_settings.button_theme), 15,
+            COLOR_ACCENT);
+
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-    ui_text(ui, 24, 696, "A edit   B close", 13, COLOR_MUTED);
+    ui_text(ui, 24, 696, "A edit/change   B close", 13, COLOR_MUTED);
     ui_end(ui);
+}
+
+static void cycle_button_theme(int delta) {
+    const int previous = g_settings.button_theme;
+    const int next = (previous + (delta < 0 ? BUTTON_THEME_COUNT - 1 : 1)) %
+                     BUTTON_THEME_COUNT;
+    g_settings.button_theme = next;
+    char error[128] = {0};
+    if (settings_save(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0) {
+        g_settings.button_theme = previous;
+        set_status("Could not save settings: %s", error);
+    } else {
+        set_status("Button theme: %s.", button_theme_name(next));
+    }
+    draw_settings(g_ui);
 }
 
 static void edit_default_path(void) {
@@ -1007,6 +1169,20 @@ typedef struct {
     char error[256];
 } DownloadJob;
 
+static void draw_theme_bar(Ui* ui, int x, int y, int width, int height) {
+    if (width <= 0)
+        return;
+    int theme = g_settings.button_theme;
+    if (theme < 0 || theme >= BUTTON_THEME_COUNT)
+        theme = DEFAULT_BUTTON_THEME;
+    const ButtonTheme* style = &kButtonThemes[theme];
+    for (int i = 0; i < style->count; i++) {
+        const int top = y + height * i / style->count;
+        const int bottom = y + height * (i + 1) / style->count;
+        ui_rect(ui, x, top, width, bottom - top, style->colors[i]);
+    }
+}
+
 static void draw_download_progress(Ui* ui, const char* title,
                                    unsigned long long received,
                                    unsigned long long total) {
@@ -1033,7 +1209,7 @@ static void draw_download_progress(Ui* ui, const char* title,
         if (percent > 100)
             percent = 100;
         const int filled = (int)((unsigned long long)bar_width * percent / 100);
-        ui_rect(ui, bar_x, bar_y, filled, bar_height, COLOR_ACCENT);
+        draw_theme_bar(ui, bar_x, bar_y, filled, bar_height);
         char line[128];
         snprintf(line, sizeof(line), "%llu%%   %.1f / %.1f MB", percent,
                  (double)received / (1024.0 * 1024.0),
@@ -1043,7 +1219,7 @@ static void draw_download_progress(Ui* ui, const char* title,
         const int filled = bar_width / 4;
         const int travel = bar_width - filled;
         const int offset = (int)((received / 32768) % (unsigned long long)(travel + 1));
-        ui_rect(ui, bar_x + offset, bar_y, filled, bar_height, COLOR_ACCENT);
+        draw_theme_bar(ui, bar_x + offset, bar_y, filled, bar_height);
         char line[96];
         snprintf(line, sizeof(line), "%.1f MB", (double)received / (1024.0 * 1024.0));
         ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
@@ -1160,7 +1336,7 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     if (percent > 100)
         percent = 100;
     const int filled = bar_width * percent / 100;
-    ui_rect(ui, bar_x, bar_y, filled, bar_height, COLOR_ACCENT);
+    draw_theme_bar(ui, bar_x, bar_y, filled, bar_height);
     char line[64];
     snprintf(line, sizeof(line), "%d%%", percent);
     ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
@@ -1192,7 +1368,7 @@ static void draw_uninstall_progress(Ui* ui, const char* title, int current, int 
     int percent = total > 0 ? current * 100 / total : 0;
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
-    ui_rect(ui, bar_x, bar_y, bar_width * percent / 100, bar_height, COLOR_ACCENT);
+    draw_theme_bar(ui, bar_x, bar_y, bar_width * percent / 100, bar_height);
     char line[64];
     snprintf(line, sizeof(line), "%d%%", percent);
     ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
@@ -2218,7 +2394,7 @@ static void refresh_catalogs(bool fetch) {
         else if (!g_repos.count)
             set_status("No repositories. Press R to add one.");
         else
-            set_status("No packages loaded. Press X to refresh.");
+            set_status("No packages loaded. Press R to add a catalog.");
     } else {
         set_status("Loaded %d package%s%s", g_manifest.count,
                    g_manifest.count == 1 ? "" : "s",
@@ -2404,7 +2580,7 @@ static void add_test_repo(void) {
         HbPackage* package = visible_package(i);
         if (package && strcmp(package->url, url) == 0) {
             g_selected = i;
-            g_scroll_page = i / VISIBLE_COUNT;
+            g_scroll_page = i / view_page_size();
             break;
         }
     }
@@ -2458,7 +2634,7 @@ static void move_selection(int delta) {
     if (next >= count)
         next = count - 1;
     g_selected = next;
-    g_scroll_page = g_selected / VISIBLE_COUNT;
+    g_scroll_page = g_selected / view_page_size();
 }
 
 static void replace_file_prefix(const char* path, const char* old_prefix,
@@ -2574,6 +2750,7 @@ int main(void) {
 
     if (settings_load(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0)
         snprintf(g_status, sizeof(g_status), "settings.json: %s", error);
+    g_list_view = g_settings.list_view != 0;
     path_mkdirs(g_settings.default_install_path);
 
     if (repos_load(REPOS_PATH, &g_repos, error, sizeof(error)) != 0) {
@@ -2601,6 +2778,22 @@ int main(void) {
     while (!g_quit && appletMainLoop()) {
         padUpdate(&pad);
         const u64 down = padGetButtonsDown(&pad);
+        static u64 nav_held;
+        static u64 nav_next_tick;
+        const u64 nav_mask = HidNpadButton_Up | HidNpadButton_Down |
+                             HidNpadButton_Left | HidNpadButton_Right;
+        const u64 held_nav = padGetButtons(&pad) & nav_mask;
+        const u64 now_tick = armGetSystemTick();
+        u64 repeat_nav = 0;
+        if (held_nav != nav_held) {
+            nav_held = held_nav;
+            if (held_nav)
+                nav_next_tick = now_tick + armNsToTicks(400000000ULL);
+        } else if (held_nav && now_tick >= nav_next_tick) {
+            repeat_nav = held_nav;
+            nav_next_tick = now_tick + armNsToTicks(200000000ULL);
+        }
+        const u64 nav = down | repeat_nav;
 
         HidKeyboardState keyboard;
         memset(&keyboard, 0, sizeof(keyboard));
@@ -2613,6 +2806,8 @@ int main(void) {
                                 keyboard_edge(&keyboard, HidKeyboardKey_NumPadEnter);
         const bool key_remove = keyboard_edge(&keyboard, HidKeyboardKey_Delete);
         const bool key_refresh = keyboard_edge(&keyboard, HidKeyboardKey_X);
+        const bool key_context = keyboard_edge(&keyboard, HidKeyboardKey_X);
+        const bool key_view = keyboard_edge(&keyboard, HidKeyboardKey_V);
         const bool key_add = keyboard_edge(&keyboard, HidKeyboardKey_R);
         const bool key_test = keyboard_edge(&keyboard, HidKeyboardKey_L);
         const bool key_manager = keyboard_edge(&keyboard, HidKeyboardKey_M);
@@ -2674,16 +2869,24 @@ int main(void) {
                 g_settings_screen = false;
                 draw_shop(&ui);
             } else if ((down & HidNpadButton_Up) || key_up) {
-                g_setting_row = 0;
+                if (g_setting_row > 0)
+                    g_setting_row--;
                 changed = true;
             } else if ((down & HidNpadButton_Down) || key_down) {
-                g_setting_row = 1;
+                if (g_setting_row < 2)
+                    g_setting_row++;
                 changed = true;
+            } else if (g_setting_row == 2 &&
+                       ((down & (HidNpadButton_Left | HidNpadButton_Right)) ||
+                        key_left || key_right)) {
+                cycle_button_theme((down & HidNpadButton_Left) || key_left ? -1 : 1);
             } else if ((down & HidNpadButton_A) || key_accept) {
                 if (g_setting_row == 0)
                     edit_default_path();
-                else
+                else if (g_setting_row == 1)
                     edit_proxy();
+                else
+                    cycle_button_theme(1);
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)
@@ -2759,19 +2962,20 @@ int main(void) {
         }
 
         bool changed = false;
-        if ((down & HidNpadButton_Left) || key_left) {
+        const int selection_step = g_list_view ? 1 : VISIBLE_COLUMNS;
+        if ((nav & HidNpadButton_Left) || key_left) {
             move_selection(-1);
             changed = true;
-        } else if ((down & HidNpadButton_Right) || key_right) {
+        } else if ((nav & HidNpadButton_Right) || key_right) {
             move_selection(1);
             changed = true;
-        } else if ((down & HidNpadButton_Up) || key_up) {
-            move_selection(-VISIBLE_COLUMNS);
+        } else if ((nav & HidNpadButton_Up) || key_up) {
+            move_selection(-selection_step);
             changed = true;
-        } else if ((down & HidNpadButton_Down) || key_down) {
-            move_selection(VISIBLE_COLUMNS);
+        } else if ((nav & HidNpadButton_Down) || key_down) {
+            move_selection(selection_step);
             changed = true;
-        } else if ((down & HidNpadButton_X) || key_refresh) {
+        } else if ((down & HidNpadButton_X) || key_context) {
             if (visible_count()) {
                 g_context_menu = true;
                 g_context_selected = 0;
@@ -2779,6 +2983,14 @@ int main(void) {
                 memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
                 continue;
             }
+        } else if ((down & HidNpadButton_Minus) || key_view) {
+            g_list_view = !g_list_view;
+            g_settings.list_view = g_list_view ? 1 : 0;
+            g_scroll_page = visible_count() ? g_selected / view_page_size() : 0;
+            char view_error[128] = {0};
+            if (settings_save(SETTINGS_PATH, &g_settings, view_error, sizeof(view_error)) != 0)
+                set_status("Could not save view: %s", view_error);
+            changed = true;
         } else if ((down & HidNpadButton_R) || key_add) {
             add_repository();
             changed = true;

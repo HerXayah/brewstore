@@ -55,8 +55,9 @@ int settings_save(const char* path, const AppSettings* settings, char* err, size
     if (!file)
         return fail(err, err_size, "cannot create settings.json");
     fprintf(file,
-            "{\n  \"defaultInstallPath\": \"%s\",\n  \"downloadProxy\": \"%s\"\n}\n",
-            settings->default_install_path, settings->download_proxy);
+            "{\n  \"defaultInstallPath\": \"%s\",\n  \"downloadProxy\": \"%s\",\n  \"buttonTheme\": %d,\n  \"listView\": %d\n}\n",
+            settings->default_install_path, settings->download_proxy, settings->button_theme,
+            settings->list_view ? 1 : 0);
     if (fclose(file) != 0) {
         remove(temporary);
         return fail(err, err_size, "cannot write settings.json");
@@ -73,6 +74,8 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
     memset(settings, 0, sizeof(*settings));
     strcpy(settings->default_install_path, DEFAULT_INSTALL_PATH);
     settings->download_proxy[0] = '\0';
+    settings->button_theme = DEFAULT_BUTTON_THEME;
+    settings->list_view = 0;
 
     FILE* file = fopen(path, "rb");
     if (!file) {
@@ -111,6 +114,34 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
                 settings->default_install_path[--path_length] = '\0';
             if (!settings_valid_path(settings->default_install_path))
                 return fail(err, err_size, "defaultInstallPath must be under sdmc:/switch or sdmc:/brewstore");
+            position = value + 1;
+            continue;
+        }
+        if (tokens[key].type == JSMN_STRING && tokens[value].type == JSMN_PRIMITIVE &&
+            (size_t)(tokens[key].end - tokens[key].start) == 11 &&
+            memcmp(text + tokens[key].start, "buttonTheme", 11) == 0) {
+            char number[16];
+            const size_t number_length = (size_t)(tokens[value].end - tokens[value].start);
+            if (number_length >= sizeof(number))
+                return fail(err, err_size, "buttonTheme is invalid");
+            memcpy(number, text + tokens[value].start, number_length);
+            number[number_length] = '\0';
+            const int theme = atoi(number);
+            if (theme >= 0 && theme < BUTTON_THEME_COUNT)
+                settings->button_theme = theme;
+            position = value + 1;
+            continue;
+        }
+        if (tokens[key].type == JSMN_STRING && tokens[value].type == JSMN_PRIMITIVE &&
+            (size_t)(tokens[key].end - tokens[key].start) == 8 &&
+            memcmp(text + tokens[key].start, "listView", 8) == 0) {
+            char number[8];
+            const size_t number_length = (size_t)(tokens[value].end - tokens[value].start);
+            if (number_length >= sizeof(number))
+                return fail(err, err_size, "listView is invalid");
+            memcpy(number, text + tokens[value].start, number_length);
+            number[number_length] = '\0';
+            settings->list_view = atoi(number) != 0;
             position = value + 1;
             continue;
         }
