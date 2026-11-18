@@ -47,6 +47,7 @@
 #define VISIBLE_COUNT (VISIBLE_COLUMNS * VISIBLE_ROWS)
 #define LIST_VISIBLE_COUNT 8
 #define REPO_VISIBLE_ROWS 10
+#define VERSION_VISIBLE_ROWS 8
 
 #define COLOR_BACKGROUND RGBA8(12, 14, 18, 255)
 #define COLOR_PANEL RGBA8(21, 24, 31, 255)
@@ -92,6 +93,12 @@ static int g_batch_completed;
 static int g_scroll_page;
 static bool g_list_view;
 static bool g_repo_manager;
+static bool g_versions_screen;
+static int g_version_selected;
+static int g_version_scroll;
+static int g_version_count;
+static ReleaseChoice g_version_choices[RELEASE_CHOICES_MAX];
+static HbPackage* g_version_package;
 static bool g_settings_screen;
 static int g_setting_row;
 enum {
@@ -301,6 +308,14 @@ static void invalidate_visible(void) {
     memset(g_installed, 0, sizeof(g_installed));
 }
 
+static unsigned long long package_published_timestamp(const HbPackage* package) {
+    if (!package->published[0])
+        return 0;
+    char* end = NULL;
+    const unsigned long long published = strtoull(package->published, &end, 10);
+    return published && end && *end == '\0' ? published : 0;
+}
+
 static const InstalledState* package_state(const HbPackage* package) {
     const int index = (int)(package - g_manifest.items);
     if (index < 0 || index >= g_manifest.count)
@@ -318,6 +333,14 @@ static const InstalledState* package_state(const HbPackage* package) {
                 if (version_is_newer(package->version, installed_version) ||
                     (package->sha256[0] && installed_hash[0] &&
                      strcasecmp(package->sha256, installed_hash) != 0))
+                    state->update = true;
+            } else {
+                const unsigned long long published = package_published_timestamp(package);
+                struct stat installed_status;
+                if (published && package->marker[0] &&
+                    stat(package->marker, &installed_status) == 0 &&
+                    installed_status.st_mtime > 0 &&
+                    (unsigned long long)installed_status.st_mtime < published)
                     state->update = true;
             }
         } else {
@@ -390,10 +413,9 @@ static int visible_count(void) {
 }
 
 static unsigned long long package_timestamp(const HbPackage* package, bool installed) {
-    if (!installed && package->published[0]) {
-        char* end = NULL;
-        const unsigned long long published = strtoull(package->published, &end, 10);
-        if (published && end && *end == '\0')
+    if (!installed) {
+        const unsigned long long published = package_published_timestamp(package);
+        if (published)
             return published;
     }
     const InstalledState* state = package_state(package);
@@ -883,10 +905,10 @@ static void draw_shop_content(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0]) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-        ui_text(ui, 24, 696, "A install   L select   X menu   - view   Y filter   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 696, "A install   L select   X menu   - view   Y filter   RS versions   ZR repos   ZL settings   B exit",
                 12, COLOR_MUTED);
     } else {
-        ui_text(ui, 24, 682, "A install   L select   X menu   - view   Y filter   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 682, "A install   L select   X menu   - view   Y filter   RS versions   ZR repos   ZL settings   B exit",
                 13, COLOR_MUTED);
     }
 
@@ -1051,6 +1073,36 @@ static void perform_confirm(void) {
     }
     g_confirm_action = CONFIRM_NONE;
     draw_repo_manager(g_ui);
+}
+
+static void draw_versions(Ui* ui) {
+    if (!ui)
+        return;
+    ui_begin(ui);
+    ui_clear(ui, COLOR_BACKGROUND);
+    ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
+    ui_text(ui, 24, 14, "Versions", 24, COLOR_TEXT);
+    if (g_version_package)
+        ui_text_truncated(ui, 24, 70, g_version_package->title, 17, COLOR_MUTED,
+                          UI_WIDTH - 48);
+    for (int slot = 0; slot < VERSION_VISIBLE_ROWS; slot++) {
+        const int index = g_version_scroll + slot;
+        if (index >= g_version_count)
+            break;
+        const int y = 104 + slot * 58;
+        const bool selected = index == g_version_selected;
+        if (selected)
+            ui_rect(ui, 20, y - 6, UI_WIDTH - 40, 50, COLOR_CARD_HOVER);
+        ui_text_truncated(ui, 34, y, g_version_choices[index].tag, 18, COLOR_TEXT,
+                          UI_WIDTH - 240);
+        ui_text_truncated(ui, 34, y + 24, g_version_choices[index].asset, 12, COLOR_MUTED,
+                          UI_WIDTH - 240);
+        if (selected)
+            ui_text(ui, UI_WIDTH - 150, y + 12, "A install", 13, COLOR_ACCENT);
+    }
+    ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
+    ui_text(ui, 24, 682, "Up/down select   A install   B back", 13, COLOR_MUTED);
+    ui_end(ui);
 }
 
 static void draw_settings(Ui* ui) {
@@ -1670,7 +1722,8 @@ static void install_redraw(void) {
         draw_shop(g_ui);
 }
 
-static void install_package(const HbPackage* package, PadState* pad) {
+static void install_package(const HbPackage* package, PadState* pad,
+                            const ReleaseChoice* choice) {
     if (!g_network_ready) {
         set_status("Network is unavailable.");
         install_redraw();
@@ -1681,7 +1734,10 @@ static void install_package(const HbPackage* package, PadState* pad) {
     char asset_name[128] = "";
     char error[256] = {0};
     unsigned long long asset_size = 0;
-    if (package->release[0] || is_plain_github_repo(package->url)) {
+    if (choice) {
+        snprintf(url, sizeof(url), "%s", choice->url);
+        snprintf(asset_name, sizeof(asset_name), "%s", choice->asset);
+    } else if (package->release[0] || is_plain_github_repo(package->url)) {
         set_status("Finding latest release for %s ...", package->title);
         install_redraw();
         if (release_latest_asset(package->url, package->asset, CACHE_DIR "/release.json",
@@ -1726,7 +1782,8 @@ static void install_package(const HbPackage* package, PadState* pad) {
     }
     char hash[65];
     snprintf(hash, sizeof(hash), "%s", job.hash);
-    if (package->sha256[0] && strcasecmp(hash, package->sha256) != 0) {
+    const char* expected_sha = choice ? choice->sha256 : package->sha256;
+    if (expected_sha[0] && strcasecmp(hash, expected_sha) != 0) {
         remove(cache);
         set_status("SHA-256 mismatch.");
         install_redraw();
@@ -2054,7 +2111,7 @@ static bool batch_install(const PreparedPackage* prepared) {
 static void install_selected_or_current(HbPackage* current, PadState* pad) {
     (void)pad;
     if (!g_marked_count) {
-        install_package(current, g_pad);
+        install_package(current, g_pad, NULL);
         return;
     }
     PreparedPackage prepared[HBPKG_MAX_PACKAGES];
@@ -2866,6 +2923,36 @@ int main(void) {
             continue;
         }
 
+        if (g_versions_screen) {
+            bool changed = false;
+            if ((down & HidNpadButton_B) || key_exit) {
+                g_ignore_b = true;
+                g_versions_screen = false;
+                draw_shop(&ui);
+            } else if (((down & HidNpadButton_Up) || key_up) && g_version_selected > 0) {
+                g_version_selected--;
+                if (g_version_selected < g_version_scroll)
+                    g_version_scroll = g_version_selected;
+                changed = true;
+            } else if (((down & HidNpadButton_Down) || key_down) &&
+                       g_version_selected + 1 < g_version_count) {
+                g_version_selected++;
+                if (g_version_selected >= g_version_scroll + VERSION_VISIBLE_ROWS)
+                    g_version_scroll = g_version_selected - VERSION_VISIBLE_ROWS + 1;
+                changed = true;
+            } else if ((down & HidNpadButton_A) || key_accept) {
+                ReleaseChoice choice = g_version_choices[g_version_selected];
+                HbPackage chosen = *g_version_package;
+                snprintf(chosen.version, sizeof(chosen.version), "%.31s", choice.tag);
+                g_versions_screen = false;
+                install_package(&chosen, &pad, &choice);
+            }
+            memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
+            if (changed)
+                draw_versions(&ui);
+            continue;
+        }
+
         if (g_settings_screen) {
             bool changed = false;
             if ((down & (HidNpadButton_B | HidNpadButton_ZL)) || key_exit) {
@@ -2967,7 +3054,28 @@ int main(void) {
 
         bool changed = false;
         const int selection_step = g_list_view ? 1 : VISIBLE_COLUMNS;
-        if ((nav & HidNpadButton_Left) || key_left) {
+        if (down & HidNpadButton_StickR) {
+            HbPackage* package = visible_package(g_selected);
+            if (package) {
+                char version_error[256] = {0};
+                g_version_count = release_list_assets(package->url, package->asset,
+                                                      CACHE_DIR "/release.json",
+                                                      g_version_choices, RELEASE_CHOICES_MAX,
+                                                      version_error, sizeof(version_error));
+                if (g_version_count > 0) {
+                    g_version_package = package;
+                    g_version_selected = 0;
+                    g_version_scroll = 0;
+                    g_versions_screen = true;
+                    draw_versions(&ui);
+                } else {
+                    set_status("Versions failed: %s", version_error);
+                    draw_shop(&ui);
+                }
+                memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
+                continue;
+            }
+        } else if ((nav & HidNpadButton_Left) || key_left) {
             move_selection(-1);
             changed = true;
         } else if ((nav & HidNpadButton_Right) || key_right) {

@@ -58,6 +58,8 @@ static bool is_debug_asset(const char* name) {
            strcasestr(name, "source");
 }
 
+static int ends_with_ci(const char* text, const char* suffix);
+
 static int read_file(const char* path, char** out, size_t* out_size, char* err, size_t err_size) {
     FILE* file = fopen(path, "rb");
     if (!file)
@@ -343,4 +345,194 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
     free(tokens);
     free(json);
     return fail(err, err_size, "release has no .nro or .zip asset");
+}
+
+static int copy_release_choice(const char* tag, const char* asset_name, const char* asset_url,
+                               const char* digest, ReleaseChoice* out) {
+    if (!tag[0] || !asset_name[0] || !asset_url[0])
+        return -1;
+    snprintf(out->tag, sizeof(out->tag), "%s", tag);
+    snprintf(out->asset, sizeof(out->asset), "%s", asset_name);
+    snprintf(out->url, sizeof(out->url), "%s", asset_url);
+    snprintf(out->sha256, sizeof(out->sha256), "%s", digest ? digest : "");
+    return 0;
+}
+
+static int github_release_list(const char* owner, const char* repo, const char* asset_hint,
+                               const char* cache_path, ReleaseChoice* out, int max,
+                               char* err, size_t err_size) {
+    char api[512];
+    snprintf(api, sizeof(api), "https://api.github.com/repos/%s/%s/releases?per_page=20",
+             owner, repo);
+    char hash[65];
+    if (http_download(api, cache_path, hash, err, err_size) != 0)
+        return -1;
+    char* json = NULL;
+    size_t length = 0;
+    if (read_file(cache_path, &json, &length, err, err_size) != 0)
+        return -1;
+    jsmntok_t* tokens = malloc(sizeof(jsmntok_t) * RELEASE_TOKENS);
+    if (!tokens) {
+        free(json);
+        return fail(err, err_size, "out of memory");
+    }
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    const int count = jsmn_parse(&parser, json, length, tokens, RELEASE_TOKENS);
+    if (count < 1 || tokens[0].type != JSMN_ARRAY) {
+        free(tokens); free(json);
+        return fail(err, err_size, "GitHub release response is not JSON");
+    }
+    int found = 0, release_position = 1;
+    for (int release = 0; release < tokens[0].size && found < max; release++) {
+        const int release_object = release_position;
+        release_position = token_skip(tokens, release_object, count);
+        if (release_object >= count || tokens[release_object].type != JSMN_OBJECT)
+            continue;
+        char tag[64];
+        if (object_get(json, tokens, count, release_object, "tag_name", tag, sizeof(tag)) != 0)
+            continue;
+        const int assets = array_get(json, tokens, count, release_object, "assets");
+        if (assets < 0)
+            continue;
+        char chosen_name[128] = "", chosen_url[1024] = "", chosen_digest[65] = "";
+        char fallback_name[128] = "", fallback_url[1024] = "", fallback_digest[65] = "";
+        int position = assets + 1;
+        for (int index = 0; index < tokens[assets].size; index++) {
+            const int object = position;
+            position = token_skip(tokens, object, count);
+            if (object >= count || tokens[object].type != JSMN_OBJECT)
+                continue;
+            char name[128], url[1024], digest[128] = "";
+            if (object_get(json, tokens, count, object, "name", name, sizeof(name)) != 0 ||
+                object_get(json, tokens, count, object, "browser_download_url", url,
+                           sizeof(url)) != 0)
+                continue;
+            object_get(json, tokens, count, object, "digest", digest, sizeof(digest));
+            if (!safe_asset_name(name) || strncmp(url, "https://", 8) != 0)
+                continue;
+            const int match = asset_hint && asset_hint[0]
+                                  ? ends_with_ci(name, asset_hint)
+                                  : ends_with_ci(name, ".nro");
+            if (match && !chosen_name[0]) {
+                snprintf(chosen_name, sizeof(chosen_name), "%s", name);
+                snprintf(chosen_url, sizeof(chosen_url), "%s", url);
+                copy_digest(digest, chosen_digest, sizeof(chosen_digest));
+            } else if (!asset_hint && !fallback_name[0] && ends_with_ci(name, ".zip") &&
+                       !is_debug_asset(name)) {
+                snprintf(fallback_name, sizeof(fallback_name), "%s", name);
+                snprintf(fallback_url, sizeof(fallback_url), "%s", url);
+                copy_digest(digest, fallback_digest, sizeof(fallback_digest));
+            }
+        }
+        if (!chosen_name[0] && fallback_name[0]) {
+            snprintf(chosen_name, sizeof(chosen_name), "%s", fallback_name);
+            snprintf(chosen_url, sizeof(chosen_url), "%s", fallback_url);
+            snprintf(chosen_digest, sizeof(chosen_digest), "%s", fallback_digest);
+        }
+        if (copy_release_choice(tag, chosen_name, chosen_url, chosen_digest, &out[found]) == 0)
+            found++;
+    }
+    free(tokens); free(json);
+    if (!found)
+        return fail(err, err_size, "No matching release assets");
+    return found;
+}
+
+static int gitlab_release_list(const char* project, const char* asset_hint,
+                               const char* cache_path, ReleaseChoice* out, int max,
+                               char* err, size_t err_size) {
+    char api[1024];
+    snprintf(api, sizeof(api), "https://gitlab.com/api/v4/projects/%s/releases?per_page=20",
+             project);
+    char hash[65];
+    if (http_download(api, cache_path, hash, err, err_size) != 0)
+        return -1;
+    char* json = NULL;
+    size_t length = 0;
+    if (read_file(cache_path, &json, &length, err, err_size) != 0)
+        return -1;
+    jsmntok_t* tokens = malloc(sizeof(jsmntok_t) * RELEASE_TOKENS);
+    if (!tokens) {
+        free(json);
+        return fail(err, err_size, "out of memory");
+    }
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    const int count = jsmn_parse(&parser, json, length, tokens, RELEASE_TOKENS);
+    if (count < 1 || tokens[0].type != JSMN_ARRAY) {
+        free(tokens); free(json);
+        return fail(err, err_size, "GitLab release response is not JSON");
+    }
+    int found = 0, release_position = 1;
+    for (int release = 0; release < tokens[0].size && found < max; release++) {
+        const int release_object = release_position;
+        release_position = token_skip(tokens, release_object, count);
+        if (release_object >= count || tokens[release_object].type != JSMN_OBJECT)
+            continue;
+        char tag[64];
+        if (object_get(json, tokens, count, release_object, "tag_name", tag, sizeof(tag)) != 0)
+            continue;
+        const int assets = object_get_object(json, tokens, count, release_object, "assets");
+        if (assets < 0)
+            continue;
+        const int links = array_get(json, tokens, count, assets, "links");
+        if (links < 0)
+            continue;
+        char chosen_name[128] = "", chosen_url[1024] = "", fallback_name[128] = "",
+             fallback_url[1024] = "";
+        int position = links + 1;
+        for (int index = 0; index < tokens[links].size; index++) {
+            const int object = position;
+            position = token_skip(tokens, object, count);
+            if (object >= count || tokens[object].type != JSMN_OBJECT)
+                continue;
+            char name[128], direct[1024] = "", url[1024] = "";
+            if (object_get(json, tokens, count, object, "name", name, sizeof(name)) != 0)
+                continue;
+            object_get(json, tokens, count, object, "direct_asset_url", direct, sizeof(direct));
+            if (!direct[0])
+                object_get(json, tokens, count, object, "url", url, sizeof(url));
+            const char* link = direct[0] ? direct : url;
+            if (!safe_asset_name(name) || strncmp(link, "https://", 8) != 0)
+                continue;
+            const int match = asset_hint && asset_hint[0]
+                                  ? ends_with_ci(name, asset_hint)
+                                  : ends_with_ci(name, ".nro");
+            if (match && !chosen_name[0]) {
+                snprintf(chosen_name, sizeof(chosen_name), "%s", name);
+                snprintf(chosen_url, sizeof(chosen_url), "%s", link);
+            } else if (!asset_hint && !fallback_name[0] && ends_with_ci(name, ".zip") &&
+                       !is_debug_asset(name)) {
+                snprintf(fallback_name, sizeof(fallback_name), "%s", name);
+                snprintf(fallback_url, sizeof(fallback_url), "%s", link);
+            }
+        }
+        if (!chosen_name[0] && fallback_name[0]) {
+            snprintf(chosen_name, sizeof(chosen_name), "%s", fallback_name);
+            snprintf(chosen_url, sizeof(chosen_url), "%s", fallback_url);
+        }
+        if (copy_release_choice(tag, chosen_name, chosen_url, "", &out[found]) == 0)
+            found++;
+    }
+    free(tokens); free(json);
+    if (!found)
+        return fail(err, err_size, "No matching release assets");
+    return found;
+}
+
+int release_list_assets(const char* repo_url, const char* asset_hint, const char* cache_path,
+                        ReleaseChoice* out, int max, char* err, size_t err_size) {
+    if (!repo_url || !out || max <= 0)
+        return fail(err, err_size, "invalid release request");
+    if (strncmp(repo_url, "https://gitlab.com/", 19) == 0) {
+        char project[512];
+        if (gitlab_project_path(repo_url, project, sizeof(project)) != 0)
+            return fail(err, err_size, "not a GitLab project URL");
+        return gitlab_release_list(project, asset_hint, cache_path, out, max, err, err_size);
+    }
+    char owner[128], repo[128];
+    if (github_repo_parts(repo_url, owner, sizeof(owner), repo, sizeof(repo)) != 0)
+        return fail(err, err_size, "not a GitHub repository URL");
+    return github_release_list(owner, repo, asset_hint, cache_path, out, max, err, err_size);
 }
