@@ -1075,6 +1075,29 @@ static void perform_confirm(void) {
     draw_repo_manager(g_ui);
 }
 
+static void format_age(unsigned long long published, char* out, size_t out_size) {
+    if (!published) {
+        snprintf(out, out_size, "released unknown");
+        return;
+    }
+    const unsigned long long now = (unsigned long long)time(NULL);
+    const unsigned long long age = now > published ? now - published : 0;
+    if (age < 3600) {
+        snprintf(out, out_size, "released %llu min ago", age / 60);
+    } else if (age < 86400) {
+        snprintf(out, out_size, "released %llu h ago", age / 3600);
+    } else {
+        snprintf(out, out_size, "released %llu days ago", age / 86400);
+    }
+}
+
+static int first_stable_version(void) {
+    for (int i = 0; i < g_version_count; i++)
+        if (!g_version_choices[i].prerelease)
+            return i;
+    return 0;
+}
+
 static void draw_versions(Ui* ui) {
     if (!ui)
         return;
@@ -1089,16 +1112,32 @@ static void draw_versions(Ui* ui) {
         const int index = g_version_scroll + slot;
         if (index >= g_version_count)
             break;
-        const int y = 104 + slot * 58;
+        const int y = 104 + slot * 64;
         const bool selected = index == g_version_selected;
         if (selected)
-            ui_rect(ui, 20, y - 6, UI_WIDTH - 40, 50, COLOR_CARD_HOVER);
-        ui_text_truncated(ui, 34, y, g_version_choices[index].tag, 18, COLOR_TEXT,
+            ui_rect(ui, 20, y - 4, UI_WIDTH - 40, 60, COLOR_CARD_HOVER);
+        if (g_version_choices[index].prerelease)
+            ui_text(ui, 34, y, g_version_choices[index].tag, 18, COLOR_ACCENT);
+        else
+            ui_text_truncated(ui, 34, y, g_version_choices[index].tag, 18, COLOR_TEXT,
+                              UI_WIDTH - 240);
+        char age[64];
+        format_age(g_version_choices[index].published, age, sizeof(age));
+        char meta[192];
+        if (g_version_choices[index].prerelease)
+            snprintf(meta, sizeof(meta), "pre-release   %s", age);
+        else
+            snprintf(meta, sizeof(meta), "%s", age);
+        ui_text_truncated(ui, 34, y + 24, meta, 12, COLOR_MUTED, UI_WIDTH - 240);
+        ui_text_truncated(ui, 34, y + 42, g_version_choices[index].asset, 11, COLOR_MUTED,
                           UI_WIDTH - 240);
-        ui_text_truncated(ui, 34, y + 24, g_version_choices[index].asset, 12, COLOR_MUTED,
-                          UI_WIDTH - 240);
-        if (selected)
-            ui_text(ui, UI_WIDTH - 150, y + 12, "A install", 13, COLOR_ACCENT);
+        if (selected) {
+            const int action_width = 200;
+            const int action_x = UI_WIDTH - action_width;
+            const int install_width = ui_text_width(ui, "A install", 13);
+            ui_text(ui, action_x + (action_width - install_width) / 2, y + 20,
+                    "A install", 13, COLOR_ACCENT);
+        }
     }
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     ui_text(ui, 24, 682, "Up/down select   A install   B back", 13, COLOR_MUTED);
@@ -2929,12 +2968,12 @@ int main(void) {
                 g_ignore_b = true;
                 g_versions_screen = false;
                 draw_shop(&ui);
-            } else if (((down & HidNpadButton_Up) || key_up) && g_version_selected > 0) {
+            } else if (((nav & HidNpadButton_Up) || key_up) && g_version_selected > 0) {
                 g_version_selected--;
                 if (g_version_selected < g_version_scroll)
                     g_version_scroll = g_version_selected;
                 changed = true;
-            } else if (((down & HidNpadButton_Down) || key_down) &&
+            } else if (((nav & HidNpadButton_Down) || key_down) &&
                        g_version_selected + 1 < g_version_count) {
                 g_version_selected++;
                 if (g_version_selected >= g_version_scroll + VERSION_VISIBLE_ROWS)
@@ -3064,7 +3103,7 @@ int main(void) {
                                                       version_error, sizeof(version_error));
                 if (g_version_count > 0) {
                     g_version_package = package;
-                    g_version_selected = 0;
+                    g_version_selected = first_stable_version();
                     g_version_scroll = 0;
                     g_versions_screen = true;
                     draw_versions(&ui);

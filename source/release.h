@@ -10,6 +10,8 @@ typedef struct {
     char asset[128];
     char url[1024];
     char sha256[65];
+    bool prerelease;
+    unsigned long long published;
 } ReleaseChoice;
 
 /// Lists release assets, newest first. Returns the count or -1.

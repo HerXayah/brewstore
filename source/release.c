@@ -25,6 +25,7 @@ static int fail(char* err, size_t err_size, const char* message) {
 #define object_get json_object_get
 #define array_get json_array_get
 #define object_get_object json_object_get_object
+#define object_get_bool json_object_get_bool
 
 static int safe_asset_name(const char* name) {
     if (!name[0] || strchr(name, '/') || strchr(name, '\\') ||
@@ -347,14 +348,39 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
     return fail(err, err_size, "release has no .nro or .zip asset");
 }
 
+static unsigned long long days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (unsigned long long)(era * 146097 + (int)doe - 719468);
+}
+
+static unsigned long long iso_epoch(const char* text) {
+    int y, m, d;
+    if (!text || sscanf(text, "%d-%d-%d", &y, &m, &d) != 3 || m < 1 || m > 12 ||
+        d < 1 || d > 31)
+        return 0;
+    return days_from_civil(y, (unsigned)m, (unsigned)d) * 86400ULL;
+}
+
+static bool prerelease_tag(const char* tag) {
+    return strcasestr(tag, "-rc") || strcasestr(tag, "-beta") ||
+           strcasestr(tag, "-alpha") || strcasestr(tag, "preview");
+}
+
 static int copy_release_choice(const char* tag, const char* asset_name, const char* asset_url,
-                               const char* digest, ReleaseChoice* out) {
+                               const char* digest, bool prerelease,
+                               unsigned long long published, ReleaseChoice* out) {
     if (!tag[0] || !asset_name[0] || !asset_url[0])
         return -1;
     snprintf(out->tag, sizeof(out->tag), "%s", tag);
     snprintf(out->asset, sizeof(out->asset), "%s", asset_name);
     snprintf(out->url, sizeof(out->url), "%s", asset_url);
     snprintf(out->sha256, sizeof(out->sha256), "%s", digest ? digest : "");
+    out->prerelease = prerelease || prerelease_tag(tag);
+    out->published = published;
     return 0;
 }
 
@@ -392,6 +418,12 @@ static int github_release_list(const char* owner, const char* repo, const char* 
         char tag[64];
         if (object_get(json, tokens, count, release_object, "tag_name", tag, sizeof(tag)) != 0)
             continue;
+        bool prerelease = false;
+        object_get_bool(json, tokens, count, release_object, "prerelease", &prerelease);
+        char published_text[32] = "";
+        object_get(json, tokens, count, release_object, "published_at",
+                   published_text, sizeof(published_text));
+        const unsigned long long published = iso_epoch(published_text);
         const int assets = array_get(json, tokens, count, release_object, "assets");
         if (assets < 0)
             continue;
@@ -430,7 +462,8 @@ static int github_release_list(const char* owner, const char* repo, const char* 
             snprintf(chosen_url, sizeof(chosen_url), "%s", fallback_url);
             snprintf(chosen_digest, sizeof(chosen_digest), "%s", fallback_digest);
         }
-        if (copy_release_choice(tag, chosen_name, chosen_url, chosen_digest, &out[found]) == 0)
+        if (copy_release_choice(tag, chosen_name, chosen_url, chosen_digest,
+                                prerelease, published, &out[found]) == 0)
             found++;
     }
     free(tokens); free(json);
@@ -473,6 +506,12 @@ static int gitlab_release_list(const char* project, const char* asset_hint,
         char tag[64];
         if (object_get(json, tokens, count, release_object, "tag_name", tag, sizeof(tag)) != 0)
             continue;
+        bool prerelease = false;
+        object_get_bool(json, tokens, count, release_object, "upcoming_release", &prerelease);
+        char published_text[32] = "";
+        object_get(json, tokens, count, release_object, "released_at",
+                   published_text, sizeof(published_text));
+        const unsigned long long published = iso_epoch(published_text);
         const int assets = object_get_object(json, tokens, count, release_object, "assets");
         if (assets < 0)
             continue;
@@ -512,7 +551,8 @@ static int gitlab_release_list(const char* project, const char* asset_hint,
             snprintf(chosen_name, sizeof(chosen_name), "%s", fallback_name);
             snprintf(chosen_url, sizeof(chosen_url), "%s", fallback_url);
         }
-        if (copy_release_choice(tag, chosen_name, chosen_url, "", &out[found]) == 0)
+        if (copy_release_choice(tag, chosen_name, chosen_url, "",
+                                prerelease, published, &out[found]) == 0)
             found++;
     }
     free(tokens); free(json);
