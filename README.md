@@ -2,7 +2,9 @@
 
 A simple **homebrew** shop for Switch 2.
 
-Currently uses a fork of [hbmenu](https://github.com/ouncebrew/ounce-hbmenu/pull/1)  
+Currently uses a fork of [hbmenu](https://github.com/ouncebrew/ounce-hbmenu/pull/1) because certain person is a clown.  
+
+<img width="560" height="176" alt="image" src="https://github.com/user-attachments/assets/d3fc7d20-8a16-4c2e-9d96-a69c54f56c23" />
 
 ## Disclaimer
 
