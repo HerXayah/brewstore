@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "release.h"
 
+#include "archive.h"
 #include "json_util.h"
 
 #include "github.h"
@@ -204,7 +205,7 @@ static int gitlab_latest_asset(const char* repo_url, const char* asset_hint,
                 free(tokens);
                 free(json);
                 return 0;
-            } else if (!fallback_name[0] && ends_with_ci(name, ".zip") &&
+            } else if (!fallback_name[0] && archive_is_archive(name) &&
                        !is_debug_asset(name)) {
                 snprintf(fallback_url, sizeof(fallback_url), "%s", link);
                 snprintf(fallback_name, sizeof(fallback_name), "%s", name);
@@ -225,7 +226,7 @@ static int gitlab_latest_asset(const char* repo_url, const char* asset_hint,
     }
     free(tokens);
     free(json);
-    return fail(err, err_size, "GitLab release has no .nro or .zip asset");
+    return fail(err, err_size, "GitLab release has no .nro or archive asset");
 }
 
 int release_latest_asset(const char* repo_url, const char* asset_hint,
@@ -322,7 +323,7 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
                 free(tokens);
                 free(json);
                 return 0;
-            } else if (!fallback_name[0] && ends_with_ci(name, ".zip") &&
+            } else if (!fallback_name[0] && archive_is_archive(name) &&
                        !is_debug_asset(name)) {
                 snprintf(fallback_url, sizeof(fallback_url), "%s", url);
                 snprintf(fallback_name, sizeof(fallback_name), "%s", name);
@@ -345,7 +346,7 @@ int release_latest_asset(const char* repo_url, const char* asset_hint,
 
     free(tokens);
     free(json);
-    return fail(err, err_size, "release has no .nro or .zip asset");
+    return fail(err, err_size, "release has no .nro or archive asset");
 }
 
 static unsigned long long days_from_civil(int y, unsigned m, unsigned d) {
@@ -450,7 +451,7 @@ static int github_release_list(const char* owner, const char* repo, const char* 
                 snprintf(chosen_name, sizeof(chosen_name), "%s", name);
                 snprintf(chosen_url, sizeof(chosen_url), "%s", url);
                 copy_digest(digest, chosen_digest, sizeof(chosen_digest));
-            } else if (!asset_hint && !fallback_name[0] && ends_with_ci(name, ".zip") &&
+            } else if (!asset_hint && !fallback_name[0] && archive_is_archive(name) &&
                        !is_debug_asset(name)) {
                 snprintf(fallback_name, sizeof(fallback_name), "%s", name);
                 snprintf(fallback_url, sizeof(fallback_url), "%s", url);
@@ -541,7 +542,7 @@ static int gitlab_release_list(const char* project, const char* asset_hint,
             if (match && !chosen_name[0]) {
                 snprintf(chosen_name, sizeof(chosen_name), "%s", name);
                 snprintf(chosen_url, sizeof(chosen_url), "%s", link);
-            } else if (!asset_hint && !fallback_name[0] && ends_with_ci(name, ".zip") &&
+            } else if (!asset_hint && !fallback_name[0] && archive_is_archive(name) &&
                        !is_debug_asset(name)) {
                 snprintf(fallback_name, sizeof(fallback_name), "%s", name);
                 snprintf(fallback_url, sizeof(fallback_url), "%s", link);

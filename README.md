@@ -2,6 +2,10 @@
 
 A simple **homebrew** shop for Switch 2.
 
+Release assets may be `.nro`, `.zip`, `.tar`, `.tar.gz`/`.tgz`, or
+`.tar.xz`/`.txz`. Archives are verified and extracted with the same path
+safety and size limits as zip packages.
+
 Currently uses a fork of [hbmenu](https://github.com/ouncebrew/ounce-hbmenu/pull/1)  
 
 ## Disclaimer
@@ -35,6 +39,8 @@ Same goes for using custom repositories.
 
 ```sh
 export DEVKITPRO=/opt/devkitpro
+# tar.xz support needs the devkitPro liblzma portlib
+dkp-pacman -S switch-liblzma
 make -j4
 ```
 

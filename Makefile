@@ -16,7 +16,7 @@ DATA		:=	data
 INCLUDES	:=	include
 APP_TITLE	:=	brewstore
 APP_AUTHOR	:=	Miella Selene / Xayah
-APP_VERSION	:=	1.2.0
+APP_VERSION	:=	1.2.1
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -31,7 +31,7 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(LIBNX)/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:=	-lminizip -lz -lnx -lm
+LIBS	:=	-lminizip -lz -llzma -lnx -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

@@ -17,6 +17,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "archive.h"
 #include "github.h"
 #include "http.h"
 #include "manifest.h"
@@ -1397,7 +1398,8 @@ static bool is_plain_github_repo(const char* url) {
         return false;
     return !strstr(url, "/releases/") && !strstr(url, "/archive/") &&
            !strstr(url, "/download/") && !strstr(url, ".zip") &&
-           !strstr(url, ".nro");
+           !strstr(url, ".tar") && !strstr(url, ".tgz") &&
+           !strstr(url, ".txz") && !strstr(url, ".nro");
 }
 
 static void draw_install_progress(Ui* ui, const char* title, const char* step,
@@ -1793,6 +1795,8 @@ static void install_package(const HbPackage* package, PadState* pad,
         set_status("Could not resolve the package URL.");
         install_redraw();
         return;
+    } else {
+        snprintf(asset_name, sizeof(asset_name), "package.zip");
     }
 
     char cache[512];
@@ -1830,14 +1834,14 @@ static void install_package(const HbPackage* package, PadState* pad,
     }
 
     if (strcmp(package->target, "sdmc:/") == 0 &&
-        (!asset_name[0] || !ends_with_ci(asset_name, ".zip"))) {
-        set_status("The SD card root target only accepts a zip archive.");
+        (!asset_name[0] || !archive_is_archive(asset_name))) {
+        set_status("The SD card root target only accepts an archive.");
         install_redraw();
         return;
     }
     if (strcmp(package->target, "sdmc:/switch") == 0 &&
-        (!asset_name[0] || ends_with_ci(asset_name, ".zip"))) {
-        set_status("sdmc:/switch only accepts a single non-zip asset.");
+        (!asset_name[0] || archive_is_archive(asset_name))) {
+        set_status("sdmc:/switch only accepts a single non-archive asset.");
         install_redraw();
         return;
     }
@@ -1850,15 +1854,15 @@ static void install_package(const HbPackage* package, PadState* pad,
     }
 
     draw_install_progress(g_ui, package->title,
-                          asset_name[0] && !ends_with_ci(asset_name, ".zip")
+                          asset_name[0] && !archive_is_archive(asset_name)
                               ? "Writing application" : "Extracting files", 45);
     char installed_file[512] = "";
     ExtractCapture capture;
     memset(&capture, 0, sizeof(capture));
     if (asset_name[0]) {
-        if (ends_with_ci(asset_name, ".zip")) {
+        if (archive_is_archive(asset_name)) {
             capture_begin(&capture, package);
-            if (zip_extract(cache, package->target, "", error, sizeof(error),
+            if (archive_extract(cache, asset_name, package->target, "", error, sizeof(error),
                         extraction_progress, &capture) != 0) {
                 capture_cancel(&capture);
                 set_status("Extract failed: %s", error);
@@ -1878,7 +1882,7 @@ static void install_package(const HbPackage* package, PadState* pad,
         }
     } else {
         capture_begin(&capture, package);
-        if (zip_extract(cache, package->target, package->strip_prefix, error,
+        if (archive_extract(cache, asset_name, package->target, package->strip_prefix, error,
                         sizeof(error), extraction_progress, &capture) != 0) {
             capture_cancel(&capture);
             set_status("Extract failed: %s", error);
@@ -2044,6 +2048,8 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
     } else if (http_github_archive_url(package->url, package->branch, url, sizeof(url)) != 0) {
         snprintf(prepared->error, sizeof(prepared->error), "cannot resolve URL");
         return false;
+    } else {
+        snprintf(prepared->asset_name, sizeof(prepared->asset_name), "package.zip");
     }
 
     snprintf(prepared->cache, sizeof(prepared->cache), CACHE_DIR "/batch-%d", index);
@@ -2073,13 +2079,13 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
 static bool batch_install(const PreparedPackage* prepared) {
     HbPackage* package = prepared->package;
     if (strcmp(package->target, "sdmc:/") == 0 &&
-        (!prepared->asset_name[0] || !ends_with_ci(prepared->asset_name, ".zip"))) {
-        set_status("The SD card root target only accepts a zip archive.");
+        (!prepared->asset_name[0] || !archive_is_archive(prepared->asset_name))) {
+        set_status("The SD card root target only accepts an archive.");
         return false;
     }
     if (strcmp(package->target, "sdmc:/switch") == 0 &&
-        (!prepared->asset_name[0] || ends_with_ci(prepared->asset_name, ".zip"))) {
-        set_status("sdmc:/switch needs a single non-zip asset.");
+        (!prepared->asset_name[0] || archive_is_archive(prepared->asset_name))) {
+        set_status("sdmc:/switch needs a single non-archive asset.");
         return false;
     }
     draw_install_progress(g_ui, package->title, "Preparing install", 10);
@@ -2089,16 +2095,16 @@ static bool batch_install(const PreparedPackage* prepared) {
     }
     draw_install_progress(g_ui, package->title,
                           prepared->asset_name[0] &&
-                                  !ends_with_ci(prepared->asset_name, ".zip")
+                                  !archive_is_archive(prepared->asset_name)
                               ? "Writing application" : "Extracting files", 45);
     char installed_file[512] = "";
     char error[256] = {0};
     ExtractCapture capture;
     memset(&capture, 0, sizeof(capture));
     if (prepared->asset_name[0]) {
-        if (ends_with_ci(prepared->asset_name, ".zip")) {
+        if (archive_is_archive(prepared->asset_name)) {
             capture_begin(&capture, package);
-            if (zip_extract(prepared->cache, package->target, "", error, sizeof(error),
+            if (archive_extract(prepared->cache, prepared->asset_name, package->target, "", error, sizeof(error),
                         extraction_progress, &capture) != 0) {
                 capture_cancel(&capture);
                 set_status("Extract failed: %s", error);
@@ -2117,8 +2123,8 @@ static bool batch_install(const PreparedPackage* prepared) {
         }
     } else {
         capture_begin(&capture, package);
-        if (zip_extract(prepared->cache, package->target, package->strip_prefix,
-                        error, sizeof(error), extraction_progress, &capture) != 0) {
+        if (archive_extract(prepared->cache, prepared->asset_name, package->target,
+                        package->strip_prefix, error, sizeof(error), extraction_progress, &capture) != 0) {
             capture_cancel(&capture);
             set_status("Extract failed: %s", error);
             return false;
@@ -2588,6 +2594,9 @@ static bool write_test_package(const char* url, char* err, size_t err_size) {
                         strstr(url, "/archive/") ||
                         strstr(url, "/download/") ||
                         strstr(url, ".zip") ||
+                        strstr(url, ".tar") ||
+                        strstr(url, ".tgz") ||
+                        strstr(url, ".txz") ||
                         strstr(url, ".nro");
     char name[64];
     char asset[128] = "";
