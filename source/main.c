@@ -103,7 +103,6 @@ static HbPackage* g_version_package;
 static bool g_settings_screen;
 static int g_setting_row;
 static int g_settings_tab;
-static bool g_repo_from_settings;
 enum { SETTINGS_TAB_APPS = 0, SETTINGS_TAB_THEMES = 1 };
 enum {
     CONFIRM_NONE = 0,
@@ -1208,7 +1207,7 @@ static void draw_settings(Ui* ui) {
     if (!ui)
         return;
     const bool themes = g_settings_tab == SETTINGS_TAB_THEMES;
-    const int max_row = themes ? 0 : 2;
+    const int max_row = themes ? 0 : 1;
     if (g_setting_row > max_row)
         g_setting_row = max_row;
 
@@ -1242,10 +1241,8 @@ static void draw_settings(Ui* ui) {
                           15, g_settings.download_proxy[0] ? COLOR_ACCENT : COLOR_MUTED,
                           UI_WIDTH - 80);
 
-        if (g_setting_row == 2)
-            ui_rect(ui, 24, 224, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-        ui_text(ui, 40, 234, "Repositories", 17, COLOR_TEXT);
-        ui_text(ui, 40, 260, "Manage app catalogs and sources", 15, COLOR_MUTED);
+        ui_text(ui, 40, 234, "Repositories", 17, COLOR_MUTED);
+        ui_text(ui, 40, 260, "WIP — disabled for now", 15, COLOR_MUTED);
     }
 
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
@@ -1253,15 +1250,6 @@ static void draw_settings(Ui* ui) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
     ui_text(ui, 24, 696, "ZR apps/themes   A edit/change   B close", 13, COLOR_MUTED);
     ui_end(ui);
-}
-
-static void open_repositories_from_settings(void) {
-    g_repo_from_settings = true;
-    g_settings_screen = false;
-    g_repo_manager = true;
-    g_repo_selected = 0;
-    g_repo_scroll = 0;
-    draw_repo_manager(g_ui);
 }
 
 static void cycle_button_theme(int delta) {
@@ -3089,7 +3077,7 @@ int main(void) {
         if (g_settings_screen) {
             bool changed = false;
             const bool themes = g_settings_tab == SETTINGS_TAB_THEMES;
-            const int max_row = themes ? 0 : 2;
+            const int max_row = themes ? 0 : 1;
             if ((down & (HidNpadButton_B | HidNpadButton_ZL)) || key_exit) {
                 g_ignore_b = true;
                 g_settings_screen = false;
@@ -3116,8 +3104,6 @@ int main(void) {
                     edit_default_path();
                 } else if (g_setting_row == 1) {
                     edit_proxy();
-                } else {
-                    open_repositories_from_settings();
                 }
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
@@ -3132,15 +3118,7 @@ int main(void) {
                 g_ignore_b = true;
                 g_repo_manager = false;
                 refresh_catalogs(false);
-                if (g_repo_from_settings) {
-                    g_repo_from_settings = false;
-                    g_settings_screen = true;
-                    g_settings_tab = SETTINGS_TAB_APPS;
-                    g_setting_row = 2;
-                    draw_settings(&ui);
-                } else {
-                    draw_shop(&ui);
-                }
+                draw_shop(&ui);
             } else if (((down & HidNpadButton_Up) || key_up) && g_repo_selected > 0) {
                 g_repo_selected--;
                 if (g_repo_selected < g_repo_scroll)
@@ -3195,7 +3173,7 @@ int main(void) {
         if ((down & HidNpadButton_ZR) || key_manager) {
             g_settings_screen = true;
             g_settings_tab = SETTINGS_TAB_APPS;
-            g_setting_row = 2;
+            g_setting_row = 0;
             draw_settings(&ui);
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             continue;
