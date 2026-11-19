@@ -86,7 +86,6 @@ static bool g_context_menu;
 static int g_context_selected;
 static PadState* g_pad;
 static bool g_return_to_repos;
-static bool g_return_to_settings;
 static bool g_batch_active;
 static bool g_batch_stop;
 static int g_batch_index;
@@ -103,9 +102,7 @@ static ReleaseChoice g_version_choices[RELEASE_CHOICES_MAX];
 static HbPackage* g_version_package;
 static bool g_settings_screen;
 static int g_setting_row;
-static int g_settings_tab;
 static char g_search[96];
-enum { SETTINGS_TAB_APPS = 0, SETTINGS_TAB_THEMES = 1 };
 enum {
     CONFIRM_NONE = 0,
     CONFIRM_DISABLE_REPO,
@@ -980,11 +977,11 @@ static void draw_shop_content(Ui* ui) {
     if (g_status[0]) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
         ui_text_truncated(ui, 24, 696,
-                          "A install   L select   X menu   - view   Y filter   L3 search   RS versions   ZR settings   ZL settings   B exit",
+                          "A install   L select   X menu   - view   Y filter   L3 search   RS versions   ZL settings   B exit",
                           12, COLOR_MUTED, UI_WIDTH - 48);
     } else {
         ui_text_truncated(ui, 24, 682,
-                          "A install   L select   X menu   - view   Y filter   L3 search   RS versions   ZR settings   ZL settings   B exit",
+                          "A install   L select   X menu   - view   Y filter   L3 search   RS versions   ZL settings   B exit",
                           13, COLOR_MUTED, UI_WIDTH - 48);
     }
 
@@ -1223,50 +1220,39 @@ static void draw_versions(Ui* ui) {
 static void draw_settings(Ui* ui) {
     if (!ui)
         return;
-    const bool themes = g_settings_tab == SETTINGS_TAB_THEMES;
-    const int max_row = themes ? 0 : 1;
-    if (g_setting_row > max_row)
-        g_setting_row = max_row;
+    if (g_setting_row > 2)
+        g_setting_row = 2;
 
     ui_begin(ui);
     ui_clear(ui, COLOR_BACKGROUND);
     ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
     ui_text(ui, 24, 14, "Settings", 24, COLOR_TEXT);
-    const char* tab = themes ? "Themes" : "Apps";
-    const int tab_width = ui_text_width(ui, tab, 13);
-    ui_text(ui, UI_WIDTH - 24 - tab_width, 27, tab, 13, COLOR_ACCENT);
 
-    if (themes) {
-        if (g_setting_row == 0)
-            ui_rect(ui, 24, 88, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-        ui_text(ui, 40, 98, "Button theme", 17, COLOR_TEXT);
-        ui_text(ui, 40, 124, button_theme_name(g_settings.button_theme), 15,
-                COLOR_ACCENT);
-    } else {
-        if (g_setting_row == 0)
-            ui_rect(ui, 24, 88, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-        ui_text(ui, 40, 98, "Default install path", 17, COLOR_TEXT);
-        ui_text_truncated(ui, 40, 124, g_settings.default_install_path, 15,
-                          COLOR_ACCENT, UI_WIDTH - 80);
+    if (g_setting_row == 0)
+        ui_rect(ui, 24, 88, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 98, "Default install path", 17, COLOR_TEXT);
+    ui_text_truncated(ui, 40, 124, g_settings.default_install_path, 15, COLOR_ACCENT,
+                      UI_WIDTH - 80);
 
-        if (g_setting_row == 1)
-            ui_rect(ui, 24, 156, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-        ui_text(ui, 40, 166, "Download proxy", 17, COLOR_TEXT);
-        ui_text_truncated(ui, 40, 192,
-                          g_settings.download_proxy[0] ? g_settings.download_proxy
-                                                       : "(none)",
-                          15, g_settings.download_proxy[0] ? COLOR_ACCENT : COLOR_MUTED,
-                          UI_WIDTH - 80);
+    if (g_setting_row == 1)
+        ui_rect(ui, 24, 156, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 166, "Download proxy", 17, COLOR_TEXT);
+    ui_text_truncated(ui, 40, 192,
+                      g_settings.download_proxy[0] ? g_settings.download_proxy : "(none)",
+                      15, g_settings.download_proxy[0] ? COLOR_ACCENT : COLOR_MUTED,
+                      UI_WIDTH - 80);
 
-        ui_text(ui, 40, 234, "Repositories", 17, COLOR_MUTED);
-        ui_text(ui, 40, 260, "WIP — disabled for now", 15, COLOR_MUTED);
-    }
+    if (g_setting_row == 2)
+        ui_rect(ui, 24, 224, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 234, "Button theme", 17, COLOR_TEXT);
+    ui_text(ui, 40, 260, button_theme_name(g_settings.button_theme), 15,
+            COLOR_ACCENT);
+
 
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-    ui_text(ui, 24, 696, "ZR apps/themes   R add repo   A edit/change   B close",
-            13, COLOR_MUTED);
+    ui_text(ui, 24, 696, "ZR repositories   A edit/change   B close", 13, COLOR_MUTED);
     ui_end(ui);
 }
 
@@ -2777,8 +2763,6 @@ static bool write_test_package(const char* url, char* err, size_t err_size) {
 static void redraw_after_prompt(void) {
     if (g_return_to_repos)
         draw_repo_manager(g_ui);
-    else if (g_return_to_settings)
-        draw_settings(g_ui);
     else
         draw_shop(g_ui);
 }
@@ -3116,39 +3100,34 @@ int main(void) {
 
         if (g_settings_screen) {
             bool changed = false;
-            const bool themes = g_settings_tab == SETTINGS_TAB_THEMES;
-            const int max_row = themes ? 0 : 1;
             if ((down & (HidNpadButton_B | HidNpadButton_ZL)) || key_exit) {
                 g_ignore_b = true;
                 g_settings_screen = false;
                 draw_shop(&ui);
             } else if ((down & HidNpadButton_ZR) || key_manager) {
-                g_settings_tab = themes ? SETTINGS_TAB_APPS : SETTINGS_TAB_THEMES;
-                g_setting_row = 0;
-                changed = true;
+                g_settings_screen = false;
+                g_repo_manager = true;
+                g_repo_selected = 0;
+                g_repo_scroll = 0;
+                draw_repo_manager(&ui);
             } else if (((down & HidNpadButton_Up) || key_up) && g_setting_row > 0) {
                 g_setting_row--;
                 changed = true;
             } else if (((down & HidNpadButton_Down) || key_down) &&
-                       g_setting_row < max_row) {
+                       g_setting_row < 2) {
                 g_setting_row++;
                 changed = true;
-            } else if (themes &&
+            } else if (g_setting_row == 2 &&
                        ((down & (HidNpadButton_Left | HidNpadButton_Right)) ||
                         key_left || key_right)) {
                 cycle_button_theme((down & HidNpadButton_Left) || key_left ? -1 : 1);
-            } else if ((down & HidNpadButton_R) || key_add) {
-                g_return_to_settings = true;
-                add_repository();
-                g_return_to_settings = false;
             } else if ((down & HidNpadButton_A) || key_accept) {
-                if (themes) {
-                    cycle_button_theme(1);
-                } else if (g_setting_row == 0) {
+                if (g_setting_row == 0)
                     edit_default_path();
-                } else if (g_setting_row == 1) {
+                else if (g_setting_row == 1)
                     edit_proxy();
-                }
+                else
+                    cycle_button_theme(1);
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)
@@ -3162,7 +3141,9 @@ int main(void) {
                 g_ignore_b = true;
                 g_repo_manager = false;
                 refresh_catalogs(false);
-                draw_shop(&ui);
+                g_settings_screen = true;
+                g_setting_row = 0;
+                draw_settings(&ui);
             } else if (((down & HidNpadButton_Up) || key_up) && g_repo_selected > 0) {
                 g_repo_selected--;
                 if (g_repo_selected < g_repo_scroll)
@@ -3209,15 +3190,6 @@ int main(void) {
 
         if ((down & HidNpadButton_ZL) || key_settings) {
             g_settings_screen = true;
-            draw_settings(&ui);
-            memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
-            continue;
-        }
-
-        if ((down & HidNpadButton_ZR) || key_manager) {
-            g_settings_screen = true;
-            g_settings_tab = SETTINGS_TAB_APPS;
-            g_setting_row = 0;
             draw_settings(&ui);
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             continue;
