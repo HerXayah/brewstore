@@ -61,6 +61,8 @@ static bool g_network_ready;
 static bool g_ssl_ready;
 static char g_proxy_prefix[256];
 static unsigned char g_reader_buffer[HTTP_BUFFER_SIZE];
+static Mutex g_download_lock;
+static bool g_download_lock_ready;
 
 static void set_error(char* err, size_t err_size, const char* format, ...) {
     if (!err || !err_size)
@@ -647,6 +649,10 @@ static int download_once(const char* url, const char* dest, char sha256_hex[65],
 }
 
 int http_global_init(char* err, size_t err_size) {
+    if (!g_download_lock_ready) {
+        mutexInit(&g_download_lock);
+        g_download_lock_ready = true;
+    }
     if (!g_network_ready) {
         const Result rc = socketInitializeDefault();
         if (R_FAILED(rc)) {
@@ -699,8 +705,13 @@ int http_download_cancel(const char* url, const char* dest, char sha256_hex[65],
     }
     if (sha256_hex)
         sha256_hex[0] = '\0';
-    return download_once(url, dest, sha256_hex, err, err_size, progress, progress_user,
-                         cancel, cancel_user, 0);
+    if (g_download_lock_ready)
+        mutexLock(&g_download_lock);
+    const int result = download_once(url, dest, sha256_hex, err, err_size, progress,
+                                     progress_user, cancel, cancel_user, 0);
+    if (g_download_lock_ready)
+        mutexUnlock(&g_download_lock);
+    return result;
 }
 
 int http_download_progress(const char* url, const char* dest, char sha256_hex[65],

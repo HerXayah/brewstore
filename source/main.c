@@ -102,6 +102,9 @@ static ReleaseChoice g_version_choices[RELEASE_CHOICES_MAX];
 static HbPackage* g_version_package;
 static bool g_settings_screen;
 static int g_setting_row;
+static int g_settings_tab;
+static bool g_repo_from_settings;
+enum { SETTINGS_TAB_APPS = 0, SETTINGS_TAB_THEMES = 1 };
 enum {
     CONFIRM_NONE = 0,
     CONFIRM_DISABLE_REPO,
@@ -121,7 +124,7 @@ static int g_repo_scroll;
 static bool g_network_ready;
 static char g_status[256];
 static char g_manifest_error[256];
-static CachedIcon g_icons[12];
+static CachedIcon g_icons[24];
 static int g_icon_count;
 static Ui* g_ui;
 static u64 g_previous_keys[4];
@@ -534,6 +537,61 @@ static const CachedIcon* cache_icon(const HbPackage* package, u32* pixels,
     return slot;
 }
 
+typedef struct {
+    Thread thread;
+    bool running;
+    volatile bool stop;
+} IconPrefetch;
+
+static IconPrefetch g_icon_prefetch;
+
+static bool icon_prefetch_cancelled(void* user) {
+    (void)user;
+    return g_icon_prefetch.stop;
+}
+
+static void icon_prefetch_worker(void* user) {
+    (void)user;
+    for (int i = 0; i < g_manifest.count && !g_icon_prefetch.stop; i++) {
+        const HbPackage* package = &g_manifest.items[i];
+        if (!package->icon[0])
+            continue;
+        char path[512];
+        snprintf(path, sizeof(path), ICON_DIR "/%s.img", package->name);
+        if (access(path, F_OK) == 0)
+            continue;
+        char hash[65];
+        char error[128];
+        http_download_cancel(package->icon, path, hash, error, sizeof(error),
+                             NULL, NULL, icon_prefetch_cancelled, NULL);
+    }
+}
+
+static void icon_prefetch_stop(void) {
+    if (!g_icon_prefetch.running)
+        return;
+    g_icon_prefetch.stop = true;
+    threadWaitForExit(&g_icon_prefetch.thread);
+    threadClose(&g_icon_prefetch.thread);
+    g_icon_prefetch.running = false;
+}
+
+static void icon_prefetch_ensure(void) {
+    if (g_icon_prefetch.running)
+        return;
+    if (!g_network_ready || !g_manifest.count)
+        return;
+    g_icon_prefetch.stop = false;
+    if (R_FAILED(threadCreate(&g_icon_prefetch.thread, icon_prefetch_worker, NULL,
+                              NULL, 0x40000, 0x2C, -2)))
+        return;
+    if (R_FAILED(threadStart(&g_icon_prefetch.thread))) {
+        threadClose(&g_icon_prefetch.thread);
+        return;
+    }
+    g_icon_prefetch.running = true;
+}
+
 static const CachedIcon* icon_for(const HbPackage* package) {
     for (int i = 0; i < g_icon_count; i++) {
         if (strcmp(g_icons[i].name, package->name) == 0)
@@ -798,6 +856,7 @@ static void draw_shop(Ui* ui) {
     ui_clear(ui, COLOR_BACKGROUND);
     draw_shop_content(ui);
     ui_end(ui);
+    icon_prefetch_ensure();
 }
 
 static void draw_shop_content(Ui* ui) {
@@ -906,10 +965,10 @@ static void draw_shop_content(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0]) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-        ui_text(ui, 24, 696, "A install   L select   X menu   - view   Y filter   RS versions   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 696, "A install   L select   X menu   - view   Y filter   RS versions   ZR settings   ZL settings   B exit",
                 12, COLOR_MUTED);
     } else {
-        ui_text(ui, 24, 682, "A install   L select   X menu   - view   Y filter   RS versions   ZR repos   ZL settings   B exit",
+        ui_text(ui, 24, 682, "A install   L select   X menu   - view   Y filter   RS versions   ZR settings   ZL settings   B exit",
                 13, COLOR_MUTED);
     }
 
@@ -1148,36 +1207,61 @@ static void draw_versions(Ui* ui) {
 static void draw_settings(Ui* ui) {
     if (!ui)
         return;
+    const bool themes = g_settings_tab == SETTINGS_TAB_THEMES;
+    const int max_row = themes ? 0 : 2;
+    if (g_setting_row > max_row)
+        g_setting_row = max_row;
+
     ui_begin(ui);
     ui_clear(ui, COLOR_BACKGROUND);
     ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
     ui_text(ui, 24, 14, "Settings", 24, COLOR_TEXT);
+    const char* tab = themes ? "Themes" : "Apps";
+    const int tab_width = ui_text_width(ui, tab, 13);
+    ui_text(ui, UI_WIDTH - 24 - tab_width, 27, tab, 13, COLOR_ACCENT);
 
-    if (g_setting_row == 0)
-        ui_rect(ui, 24, 88, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-    ui_text(ui, 40, 98, "Default install path", 17, COLOR_TEXT);
-    ui_text_truncated(ui, 40, 124, g_settings.default_install_path, 15, COLOR_ACCENT,
-                      UI_WIDTH - 80);
+    if (themes) {
+        if (g_setting_row == 0)
+            ui_rect(ui, 24, 88, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+        ui_text(ui, 40, 98, "Button theme", 17, COLOR_TEXT);
+        ui_text(ui, 40, 124, button_theme_name(g_settings.button_theme), 15,
+                COLOR_ACCENT);
+    } else {
+        if (g_setting_row == 0)
+            ui_rect(ui, 24, 88, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+        ui_text(ui, 40, 98, "Default install path", 17, COLOR_TEXT);
+        ui_text_truncated(ui, 40, 124, g_settings.default_install_path, 15,
+                          COLOR_ACCENT, UI_WIDTH - 80);
 
-    if (g_setting_row == 1)
-        ui_rect(ui, 24, 156, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-    ui_text(ui, 40, 166, "Download proxy", 17, COLOR_TEXT);
-    ui_text_truncated(ui, 40, 192,
-                      g_settings.download_proxy[0] ? g_settings.download_proxy : "(none)",
-                      15, g_settings.download_proxy[0] ? COLOR_ACCENT : COLOR_MUTED,
-                      UI_WIDTH - 80);
+        if (g_setting_row == 1)
+            ui_rect(ui, 24, 156, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+        ui_text(ui, 40, 166, "Download proxy", 17, COLOR_TEXT);
+        ui_text_truncated(ui, 40, 192,
+                          g_settings.download_proxy[0] ? g_settings.download_proxy
+                                                       : "(none)",
+                          15, g_settings.download_proxy[0] ? COLOR_ACCENT : COLOR_MUTED,
+                          UI_WIDTH - 80);
 
-    if (g_setting_row == 2)
-        ui_rect(ui, 24, 224, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-    ui_text(ui, 40, 234, "Button theme", 17, COLOR_TEXT);
-    ui_text(ui, 40, 260, button_theme_name(g_settings.button_theme), 15,
-            COLOR_ACCENT);
+        if (g_setting_row == 2)
+            ui_rect(ui, 24, 224, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+        ui_text(ui, 40, 234, "Repositories", 17, COLOR_TEXT);
+        ui_text(ui, 40, 260, "Manage app catalogs and sources", 15, COLOR_MUTED);
+    }
 
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-    ui_text(ui, 24, 696, "A edit/change   B close", 13, COLOR_MUTED);
+    ui_text(ui, 24, 696, "ZR apps/themes   A edit/change   B close", 13, COLOR_MUTED);
     ui_end(ui);
+}
+
+static void open_repositories_from_settings(void) {
+    g_repo_from_settings = true;
+    g_settings_screen = false;
+    g_repo_manager = true;
+    g_repo_selected = 0;
+    g_repo_scroll = 0;
+    draw_repo_manager(g_ui);
 }
 
 static void cycle_button_theme(int delta) {
@@ -2419,6 +2503,7 @@ static bool load_catalog_file(const char* path, const char* base, bool fetch,
 }
 
 static void refresh_catalogs(bool fetch) {
+    icon_prefetch_stop();
     char error[256] = {0};
     int failures = 0;
     g_manifest.count = 0;
@@ -3003,29 +3088,37 @@ int main(void) {
 
         if (g_settings_screen) {
             bool changed = false;
+            const bool themes = g_settings_tab == SETTINGS_TAB_THEMES;
+            const int max_row = themes ? 0 : 2;
             if ((down & (HidNpadButton_B | HidNpadButton_ZL)) || key_exit) {
                 g_ignore_b = true;
                 g_settings_screen = false;
                 draw_shop(&ui);
-            } else if ((down & HidNpadButton_Up) || key_up) {
-                if (g_setting_row > 0)
-                    g_setting_row--;
+            } else if ((down & HidNpadButton_ZR) || key_manager) {
+                g_settings_tab = themes ? SETTINGS_TAB_APPS : SETTINGS_TAB_THEMES;
+                g_setting_row = 0;
                 changed = true;
-            } else if ((down & HidNpadButton_Down) || key_down) {
-                if (g_setting_row < 2)
-                    g_setting_row++;
+            } else if (((down & HidNpadButton_Up) || key_up) && g_setting_row > 0) {
+                g_setting_row--;
                 changed = true;
-            } else if (g_setting_row == 2 &&
+            } else if (((down & HidNpadButton_Down) || key_down) &&
+                       g_setting_row < max_row) {
+                g_setting_row++;
+                changed = true;
+            } else if (themes &&
                        ((down & (HidNpadButton_Left | HidNpadButton_Right)) ||
                         key_left || key_right)) {
                 cycle_button_theme((down & HidNpadButton_Left) || key_left ? -1 : 1);
             } else if ((down & HidNpadButton_A) || key_accept) {
-                if (g_setting_row == 0)
-                    edit_default_path();
-                else if (g_setting_row == 1)
-                    edit_proxy();
-                else
+                if (themes) {
                     cycle_button_theme(1);
+                } else if (g_setting_row == 0) {
+                    edit_default_path();
+                } else if (g_setting_row == 1) {
+                    edit_proxy();
+                } else {
+                    open_repositories_from_settings();
+                }
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)
@@ -3039,7 +3132,15 @@ int main(void) {
                 g_ignore_b = true;
                 g_repo_manager = false;
                 refresh_catalogs(false);
-                draw_shop(&ui);
+                if (g_repo_from_settings) {
+                    g_repo_from_settings = false;
+                    g_settings_screen = true;
+                    g_settings_tab = SETTINGS_TAB_APPS;
+                    g_setting_row = 2;
+                    draw_settings(&ui);
+                } else {
+                    draw_shop(&ui);
+                }
             } else if (((down & HidNpadButton_Up) || key_up) && g_repo_selected > 0) {
                 g_repo_selected--;
                 if (g_repo_selected < g_repo_scroll)
@@ -3092,10 +3193,10 @@ int main(void) {
         }
 
         if ((down & HidNpadButton_ZR) || key_manager) {
-            g_repo_manager = true;
-            g_repo_selected = 0;
-            g_repo_scroll = 0;
-            draw_repo_manager(&ui);
+            g_settings_screen = true;
+            g_settings_tab = SETTINGS_TAB_APPS;
+            g_setting_row = 2;
+            draw_settings(&ui);
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             continue;
         }
@@ -3180,6 +3281,7 @@ int main(void) {
             draw_shop(&ui);
     }
 
+    icon_prefetch_stop();
     free_icons();
     http_global_exit();
     ui_exit(&ui);
