@@ -86,6 +86,7 @@ static bool g_context_menu;
 static int g_context_selected;
 static PadState* g_pad;
 static bool g_return_to_repos;
+static bool g_return_to_settings;
 static bool g_batch_active;
 static bool g_batch_stop;
 static int g_batch_index;
@@ -103,6 +104,7 @@ static HbPackage* g_version_package;
 static bool g_settings_screen;
 static int g_setting_row;
 static int g_settings_tab;
+static char g_search[96];
 enum { SETTINGS_TAB_APPS = 0, SETTINGS_TAB_THEMES = 1 };
 enum {
     CONFIRM_NONE = 0,
@@ -356,6 +358,12 @@ static const InstalledState* package_state(const HbPackage* package) {
 
 static int compare_packages(const void* left, const void* right);
 
+static bool package_matches_search(const HbPackage* package) {
+    if (!g_search[0])
+        return true;
+    return strcasestr(package->name, g_search) || strcasestr(package->title, g_search);
+}
+
 static void rebuild_visible(void) {
     if (!g_visible_dirty)
         return;
@@ -369,7 +377,7 @@ static void rebuild_visible(void) {
             case FILTER_NOT_INSTALLED: match = !state->installed; break;
             default: break;
         }
-        if (match)
+        if (match && package_matches_search(&g_manifest.items[i]))
             g_visible[g_visible_count++] = &g_manifest.items[i];
     }
     qsort(g_visible, (size_t)g_visible_count, sizeof(g_visible[0]), compare_packages);
@@ -877,10 +885,17 @@ static void draw_shop_content(Ui* ui) {
     ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
     ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
             "Codename YukinaMinato", 9, COLOR_MUTED);
-    char list_label[64];
-    snprintf(list_label, sizeof(list_label), "%s · %s", filter_name(), sort_name());
+    char list_label[192];
+    if (g_search[0])
+        snprintf(list_label, sizeof(list_label), "Search: %s", g_search);
+    else
+        snprintf(list_label, sizeof(list_label), "%s · %s", filter_name(), sort_name());
     const int filter_width = ui_text_width(ui, list_label, 13);
-    ui_text(ui, UI_WIDTH - 24 - filter_width, 25, list_label, 13, COLOR_ACCENT);
+    int filter_x = UI_WIDTH - 32 - filter_width;
+    if (filter_x < 360)
+        filter_x = 360;
+    ui_text_truncated(ui, filter_x, 25, list_label, 13, COLOR_ACCENT,
+                      UI_WIDTH - 24 - filter_x);
 
     if (!g_manifest.count) {
         ui_text(ui, 24, 104, "Nothing here yet", 26, COLOR_TEXT);
@@ -964,11 +979,13 @@ static void draw_shop_content(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0]) {
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-        ui_text(ui, 24, 696, "A install   L select   X menu   - view   Y filter   RS versions   ZR settings   ZL settings   B exit",
-                12, COLOR_MUTED);
+        ui_text_truncated(ui, 24, 696,
+                          "A install   L select   X menu   - view   Y filter   L3 search   RS versions   ZR settings   ZL settings   B exit",
+                          12, COLOR_MUTED, UI_WIDTH - 48);
     } else {
-        ui_text(ui, 24, 682, "A install   L select   X menu   - view   Y filter   RS versions   ZR settings   ZL settings   B exit",
-                13, COLOR_MUTED);
+        ui_text_truncated(ui, 24, 682,
+                          "A install   L select   X menu   - view   Y filter   L3 search   RS versions   ZR settings   ZL settings   B exit",
+                          13, COLOR_MUTED, UI_WIDTH - 48);
     }
 
 }
@@ -1248,7 +1265,8 @@ static void draw_settings(Ui* ui) {
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
         ui_text_truncated(ui, 24, 670, g_status, 14, COLOR_TEXT, UI_WIDTH - 48);
-    ui_text(ui, 24, 696, "ZR apps/themes   A edit/change   B close", 13, COLOR_MUTED);
+    ui_text(ui, 24, 696, "ZR apps/themes   R add repo   A edit/change   B close",
+            13, COLOR_MUTED);
     ui_end(ui);
 }
 
@@ -2617,6 +2635,26 @@ static bool prompt_text(const char* header, const char* guide, const char* initi
     return true;
 }
 
+static void edit_search(void) {
+    char query[sizeof(g_search)];
+    if (!prompt_text("Search apps", "App name or title; empty clears",
+                     g_search, query, sizeof(query))) {
+        set_status("Search cancelled.");
+        draw_shop(g_ui);
+        return;
+    }
+    snprintf(g_search, sizeof(g_search), "%s", query);
+    invalidate_visible();
+    g_selected = 0;
+    g_scroll_page = 0;
+    clamp_selection();
+    if (g_search[0])
+        set_status("Search: %s", g_search);
+    else
+        set_status("Search cleared.");
+    draw_shop(g_ui);
+}
+
 static bool prompt_repository(char* out, size_t out_size) {
     return prompt_text("Add repository", "URL of a packages.json catalog",
                        "https://", out, out_size);
@@ -2739,6 +2777,8 @@ static bool write_test_package(const char* url, char* err, size_t err_size) {
 static void redraw_after_prompt(void) {
     if (g_return_to_repos)
         draw_repo_manager(g_ui);
+    else if (g_return_to_settings)
+        draw_settings(g_ui);
     else
         draw_shop(g_ui);
 }
@@ -3097,6 +3137,10 @@ int main(void) {
                        ((down & (HidNpadButton_Left | HidNpadButton_Right)) ||
                         key_left || key_right)) {
                 cycle_button_theme((down & HidNpadButton_Left) || key_left ? -1 : 1);
+            } else if ((down & HidNpadButton_R) || key_add) {
+                g_return_to_settings = true;
+                add_repository();
+                g_return_to_settings = false;
             } else if ((down & HidNpadButton_A) || key_accept) {
                 if (themes) {
                     cycle_button_theme(1);
@@ -3179,6 +3223,12 @@ int main(void) {
             continue;
         }
 
+        if (down & HidNpadButton_StickL) {
+            edit_search();
+            memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
+            continue;
+        }
+
         bool changed = false;
         const int selection_step = g_list_view ? 1 : VISIBLE_COLUMNS;
         if (down & HidNpadButton_StickR) {
@@ -3229,9 +3279,6 @@ int main(void) {
             char view_error[128] = {0};
             if (settings_save(SETTINGS_PATH, &g_settings, view_error, sizeof(view_error)) != 0)
                 set_status("Could not save view: %s", view_error);
-            changed = true;
-        } else if ((down & HidNpadButton_R) || key_add) {
-            add_repository();
             changed = true;
         } else if ((down & HidNpadButton_L) || key_test) {
             HbPackage* package = visible_package(g_selected);
