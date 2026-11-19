@@ -1909,9 +1909,8 @@ static void install_package(const HbPackage* package, PadState* pad,
         return;
     }
 
-    if (strcmp(package->target, "sdmc:/") == 0 &&
-        (!asset_name[0] || !archive_is_archive(asset_name))) {
-        set_status("The SD card root target only accepts an archive.");
+    if (strcmp(package->target, "sdmc:/") == 0 && !asset_name[0]) {
+        set_status("The SD card root target needs a release asset.");
         install_redraw();
         return;
     }
@@ -2154,9 +2153,8 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
 
 static bool batch_install(const PreparedPackage* prepared) {
     HbPackage* package = prepared->package;
-    if (strcmp(package->target, "sdmc:/") == 0 &&
-        (!prepared->asset_name[0] || !archive_is_archive(prepared->asset_name))) {
-        set_status("The SD card root target only accepts an archive.");
+    if (strcmp(package->target, "sdmc:/") == 0 && !prepared->asset_name[0]) {
+        set_status("The SD card root target needs a release asset.");
         return false;
     }
     if (strcmp(package->target, "sdmc:/switch") == 0 &&
