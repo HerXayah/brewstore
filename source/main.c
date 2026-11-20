@@ -1825,6 +1825,30 @@ static bool shortcut_target(const HbPackage* package, const char* installed_file
     return false;
 }
 
+static void hbmenu_star_path(const char* nro, char* out, size_t out_size) {
+    const char* slash = strrchr(nro, '/');
+    if (!slash || !slash[1]) {
+        out[0] = '\0';
+        return;
+    }
+    snprintf(out, out_size, "%.*s.%s.star", (int)(slash - nro + 1), nro, slash + 1);
+}
+
+/* hbmenu keeps a .<nro>.star marker beside the NRO. If an update changes the
+ * NRO filename (or directory), carry the marker over so the star survives. */
+static void preserve_hbmenu_star(const char* old_nro, const char* new_nro) {
+    if (!old_nro[0] || !new_nro[0] || strcmp(old_nro, new_nro) == 0)
+        return;
+    char old_star[1024];
+    char new_star[1024];
+    hbmenu_star_path(old_nro, old_star, sizeof(old_star));
+    hbmenu_star_path(new_nro, new_star, sizeof(new_star));
+    if (!old_star[0] || !new_star[0] || access(old_star, F_OK) != 0 ||
+        access(new_star, F_OK) == 0)
+        return;
+    rename(old_star, new_star);
+}
+
 static void update_shortcut(const HbPackage* package, const char* installed_file) {
     char nro[512];
     if (package->shortcut &&
@@ -1981,6 +2005,10 @@ static void install_package(const HbPackage* package, PadState* pad,
     unsigned long long updated_at = 0;
     read_state(package, old_version, sizeof(old_version), old_hash, sizeof(old_hash),
                old_file, sizeof(old_file), &installed_at, &updated_at);
+    char new_file[512];
+    if (!shortcut_target(package, installed_file, new_file, sizeof(new_file)))
+        new_file[0] = '\0';
+    preserve_hbmenu_star(old_file, new_file);
     const unsigned long long now = (unsigned long long)time(NULL);
     if (!installed_at)
         installed_at = now;
@@ -2218,6 +2246,10 @@ static bool batch_install(const PreparedPackage* prepared) {
     unsigned long long updated_at = 0;
     read_state(package, old_version, sizeof(old_version), old_hash, sizeof(old_hash),
                old_file, sizeof(old_file), &installed_at, &updated_at);
+    char new_file[512];
+    if (!shortcut_target(package, installed_file, new_file, sizeof(new_file)))
+        new_file[0] = '\0';
+    preserve_hbmenu_star(old_file, new_file);
     const unsigned long long now = (unsigned long long)time(NULL);
     if (!installed_at)
         installed_at = now;
