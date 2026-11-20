@@ -451,8 +451,8 @@ static int github_release_list(const char* owner, const char* repo, const char* 
                 snprintf(chosen_name, sizeof(chosen_name), "%s", name);
                 snprintf(chosen_url, sizeof(chosen_url), "%s", url);
                 copy_digest(digest, chosen_digest, sizeof(chosen_digest));
-            } else if (!asset_hint && !fallback_name[0] && archive_is_archive(name) &&
-                       !is_debug_asset(name)) {
+            } else if ((!asset_hint || !asset_hint[0]) && !fallback_name[0] &&
+                       archive_is_archive(name) && !is_debug_asset(name)) {
                 snprintf(fallback_name, sizeof(fallback_name), "%s", name);
                 snprintf(fallback_url, sizeof(fallback_url), "%s", url);
                 copy_digest(digest, fallback_digest, sizeof(fallback_digest));
@@ -542,7 +542,8 @@ static int gitlab_release_list(const char* project, const char* asset_hint,
             if (match && !chosen_name[0]) {
                 snprintf(chosen_name, sizeof(chosen_name), "%s", name);
                 snprintf(chosen_url, sizeof(chosen_url), "%s", link);
-            } else if (!asset_hint && !fallback_name[0] && archive_is_archive(name) &&
+            } else if ((!asset_hint || !asset_hint[0]) && !fallback_name[0] &&
+                       archive_is_archive(name) &&
                        !is_debug_asset(name)) {
                 snprintf(fallback_name, sizeof(fallback_name), "%s", name);
                 snprintf(fallback_url, sizeof(fallback_url), "%s", link);
@@ -562,6 +563,146 @@ static int gitlab_release_list(const char* project, const char* asset_hint,
     return found;
 }
 
+/* GitHub's unauthenticated API is rate-limited (HTTP 403). The releases atom
+ * feed is not, so use it as a fallback. When the manifest has no fixed asset
+ * name, read the tag's expanded-assets page to discover it. */
+static int atom_asset_name(const char* owner, const char* repo, const char* tag,
+                           const char* cache_path, char* name, size_t name_size,
+                           char* err, size_t err_size) {
+    char url[1024];
+    snprintf(url, sizeof(url), "https://github.com/%s/%s/releases/expanded_assets/%s",
+             owner, repo, tag);
+    char hash[65];
+    if (http_download(url, cache_path, hash, err, err_size) != 0)
+        return -1;
+    char* html = NULL;
+    size_t length = 0;
+    if (read_file(cache_path, &html, &length, err, err_size) != 0)
+        return -1;
+
+    char archive[128] = "";
+    const char* cursor = html;
+    while ((cursor = strstr(cursor, "/releases/download/")) != NULL) {
+        const char* file = cursor + strlen("/releases/download/");
+        file = strchr(file, '/'); /* skip the tag segment */
+        if (file)
+            file++;
+        if (!file) {
+            cursor += strlen("/releases/download/");
+            continue;
+        }
+        const char* end = strchr(file, '"');
+        if (!end) {
+            break;
+        }
+        const size_t file_length = (size_t)(end - file);
+        if (file_length && file_length < sizeof(archive)) {
+            char candidate[128];
+            memcpy(candidate, file, file_length);
+            candidate[file_length] = '\0';
+            if (safe_asset_name(candidate)) {
+                if (ends_with_ci(candidate, ".nro")) {
+                    snprintf(name, name_size, "%s", candidate);
+                    free(html);
+                    return 0;
+                }
+                if (!archive[0] && archive_is_archive(candidate) &&
+                    !is_debug_asset(candidate))
+                    snprintf(archive, sizeof(archive), "%s", candidate);
+            }
+        }
+        cursor = end;
+    }
+    free(html);
+    if (archive[0]) {
+        snprintf(name, name_size, "%s", archive);
+        return 0;
+    }
+    return fail(err, err_size, "No matching release assets");
+}
+
+static int github_release_list_atom(const char* owner, const char* repo,
+                                    const char* asset_hint, const char* cache_path,
+                                    ReleaseChoice* out, int max,
+                                    char* err, size_t err_size) {
+    char atom_url[1024];
+    snprintf(atom_url, sizeof(atom_url), "https://github.com/%s/%s/releases.atom",
+             owner, repo);
+    char hash[65];
+    if (http_download(atom_url, cache_path, hash, err, err_size) != 0)
+        return -1;
+
+    char* xml = NULL;
+    size_t length = 0;
+    if (read_file(cache_path, &xml, &length, err, err_size) != 0)
+        return -1;
+
+    int found = 0;
+    const char* cursor = xml;
+    while (found < max) {
+        const char* entry = strstr(cursor, "<entry>");
+        if (!entry)
+            break;
+        const char* entry_end = strstr(entry, "</entry>");
+        const char* link = strstr(entry, "releases/tag/");
+        if (!link || (entry_end && link > entry_end)) {
+            cursor = entry_end ? entry_end + 8 : entry + 7;
+            continue;
+        }
+        link += strlen("releases/tag/");
+        const char* tag_end = strchr(link, '"');
+        if (!tag_end) {
+            cursor = entry_end ? entry_end + 8 : entry + 7;
+            continue;
+        }
+        const size_t tag_length = (size_t)(tag_end - link);
+        if (!tag_length || tag_length >= sizeof(out[found].tag)) {
+            cursor = entry_end ? entry_end + 8 : entry + 7;
+            continue;
+        }
+
+        char tag[64];
+        memcpy(tag, link, tag_length);
+        tag[tag_length] = '\0';
+
+        char asset[128];
+        if (asset_hint && asset_hint[0]) {
+            snprintf(asset, sizeof(asset), "%s", asset_hint);
+        } else if (atom_asset_name(owner, repo, tag, cache_path, asset,
+                                   sizeof(asset), err, err_size) != 0) {
+            cursor = entry_end ? entry_end + 8 : entry + 7;
+            continue;
+        }
+
+        char updated[32] = "";
+        const char* updated_start = strstr(entry, "<updated>");
+        if (updated_start && (!entry_end || updated_start < entry_end)) {
+            updated_start += strlen("<updated>");
+            const char* updated_end = strchr(updated_start, '<');
+            if (updated_end && (size_t)(updated_end - updated_start) < sizeof(updated)) {
+                memcpy(updated, updated_start, (size_t)(updated_end - updated_start));
+                updated[updated_end - updated_start] = '\0';
+            }
+        }
+
+        snprintf(out[found].tag, sizeof(out[found].tag), "%s", tag);
+        snprintf(out[found].asset, sizeof(out[found].asset), "%s", asset);
+        snprintf(out[found].url, sizeof(out[found].url),
+                 "https://github.com/%s/%s/releases/download/%s/%s",
+                 owner, repo, tag, asset);
+        out[found].sha256[0] = '\0';
+        out[found].prerelease = false;
+        out[found].published = iso_epoch(updated);
+        found++;
+
+        cursor = entry_end ? entry_end + 8 : entry + 7;
+    }
+    free(xml);
+    if (!found)
+        return fail(err, err_size, "No matching release assets");
+    return found;
+}
+
 int release_list_assets(const char* repo_url, const char* asset_hint, const char* cache_path,
                         ReleaseChoice* out, int max, char* err, size_t err_size) {
     if (!repo_url || !out || max <= 0)
@@ -575,5 +716,17 @@ int release_list_assets(const char* repo_url, const char* asset_hint, const char
     char owner[128], repo[128];
     if (github_repo_parts(repo_url, owner, sizeof(owner), repo, sizeof(repo)) != 0)
         return fail(err, err_size, "not a GitHub repository URL");
-    return github_release_list(owner, repo, asset_hint, cache_path, out, max, err, err_size);
+    int result = github_release_list(owner, repo, asset_hint, cache_path, out, max,
+                                     err, err_size);
+    if (result > 0)
+        return result;
+    char fallback_error[256] = {0};
+    const int fallback = github_release_list_atom(owner, repo, asset_hint, cache_path,
+                                                  out, max, fallback_error,
+                                                  sizeof(fallback_error));
+    if (fallback > 0)
+        return fallback;
+    if (fallback_error[0])
+        return fail(err, err_size, fallback_error);
+    return result;
 }
