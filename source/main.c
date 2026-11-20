@@ -940,27 +940,41 @@ static void draw_shop_content(Ui* ui) {
                         14, selected_state->update ? COLOR_ACCENT : COLOR_GREEN);
             }
         }
-        ui_text(ui, 958, 188, display_version(selected), 15, COLOR_MUTED);
         {
             const InstalledState* selected_state = package_state(selected);
-            if (selected_state && selected_state->installed) {
-                char version[64];
-                char hash[65];
-                char file[512];
-                unsigned long long installed_at = 0;
-                if (read_state(selected, version, sizeof(version), hash, sizeof(hash),
-                               file, sizeof(file), &installed_at, NULL) && installed_at) {
-                    char date[64];
-                    format_installed_time(installed_at, date, sizeof(date));
-                    char line[96];
-                    snprintf(line, sizeof(line), "Installed %s", date);
-                    ui_text_truncated(ui, 958, 212, line, 12, COLOR_MUTED, 268);
-                }
-            }
-        }
+            const bool installed = selected_state && selected_state->installed;
+            char version[64] = "";
+            char hash[65];
+            char file[512];
+            unsigned long long installed_at = 0;
+            unsigned long long updated_at = 0;
+            const bool have_state = installed &&
+                read_state(selected, version, sizeof(version), hash, sizeof(hash),
+                           file, sizeof(file), &installed_at, &updated_at);
 
-        ui_markdown_wrap(ui, 958, 236, selected->description, 15, COLOR_TEXT,
-                         268, 7, 21);
+            char line[128];
+            snprintf(line, sizeof(line), "Available  %s", display_version(selected));
+            ui_text_truncated(ui, 958, 188, line, 14, COLOR_MUTED, 268);
+
+            int description_y = 236;
+            if (installed) {
+                snprintf(line, sizeof(line), "Installed  %s",
+                         have_state && version[0] ? version : "(external)");
+                ui_text_truncated(ui, 958, 210, line, 14, COLOR_MUTED, 268);
+
+                const unsigned long long when = updated_at ? updated_at : installed_at;
+                if (when) {
+                    char date[64];
+                    format_installed_time(when, date, sizeof(date));
+                    snprintf(line, sizeof(line), "Updated    %s", date);
+                    ui_text_truncated(ui, 958, 232, line, 12, COLOR_MUTED, 268);
+                }
+                description_y = 260;
+            }
+
+            ui_markdown_wrap(ui, 958, description_y, selected->description, 15, COLOR_TEXT,
+                             268, 7, 21);
+        }
 
         ui_text_truncated(ui, 958, 522, selected->target, 12, COLOR_MUTED, 268);
         const int button_y = 556;
