@@ -48,7 +48,7 @@
 #define SHORTCUTS_PATH "sdmc:/switch/shortcuts.txt"
 #define DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/catalog.json"
 #define LEGACY_DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json"
-#define ASSET_URL_BASE "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/assets/"
+#define ASSET_URL_BASE "https://raw.githubusercontent.com/HerXayah/brewstore/main/assets/"
 #define PROGRESS_ASSET_COUNT 6
 static const char* const kProgressAssets[PROGRESS_ASSET_COUNT] = {
     "lisa-imai.gif",
