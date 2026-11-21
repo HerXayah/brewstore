@@ -38,5 +38,18 @@ void ui_text_truncated(Ui* ui, int x, int y, const char* text, int pixel_height,
 void ui_image(Ui* ui, int x, int y, int width, int height,
               const u32* pixels, int image_width, int image_height);
 
+typedef struct {
+    u32* pixels;
+    int* delays;
+    int width;
+    int height;
+    int frame_count;
+} UiGif;
+
+/// Decodes an animated GIF held in memory into RGBA8 frames. Caller frees with
+/// ui_gif_free().
+int ui_gif_load_memory(const unsigned char* data, size_t size, UiGif* out);
+void ui_gif_free(UiGif* gif);
+
 /// Loads a PNG/JPEG from SD into an RGBA8 buffer. Caller frees pixels.
 int ui_load_image(const char* path, u32** pixels, int* width, int* height);

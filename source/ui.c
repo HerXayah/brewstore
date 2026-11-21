@@ -456,6 +456,51 @@ void ui_image(Ui* ui, int x, int y, int width, int height,
     }
 }
 
+int ui_gif_load_memory(const unsigned char* data, size_t size, UiGif* out) {
+    memset(out, 0, sizeof(*out));
+    if (!data || !size || size > 16 * 1024 * 1024)
+        return -1;
+    int* delays = NULL;
+    int width = 0;
+    int height = 0;
+    int frames = 0;
+    int channels = 0;
+    unsigned char* decoded = stbi_load_gif_from_memory(
+        data, (int)size, &delays, &width, &height, &frames, &channels, 4);
+    if (!decoded || !delays || width <= 0 || height <= 0 || frames <= 0 ||
+        width > 640 || height > 640 || frames > 512) {
+        stbi_image_free(decoded);
+        free(delays);
+        return -1;
+    }
+    const size_t count = (size_t)width * (size_t)height * (size_t)frames;
+    u32* pixels = malloc(count * sizeof(u32));
+    if (!pixels) {
+        stbi_image_free(decoded);
+        free(delays);
+        return -1;
+    }
+    for (size_t i = 0; i < count; i++) {
+        pixels[i] = RGBA8(decoded[i * 4 + 0], decoded[i * 4 + 1],
+                          decoded[i * 4 + 2], decoded[i * 4 + 3]);
+    }
+    stbi_image_free(decoded);
+    out->pixels = pixels;
+    out->delays = delays;
+    out->width = width;
+    out->height = height;
+    out->frame_count = frames;
+    return 0;
+}
+
+void ui_gif_free(UiGif* gif) {
+    if (!gif)
+        return;
+    free(gif->pixels);
+    free(gif->delays);
+    memset(gif, 0, sizeof(*gif));
+}
+
 int ui_load_image(const char* path, u32** pixels, int* width, int* height) {
     *pixels = NULL;
     *width = 0;

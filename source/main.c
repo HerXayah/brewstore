@@ -3,6 +3,7 @@
 // It downloads GitHub archives, verifies optional SHA-256, and extracts them
 // under sdmc:/switch or sdmc:/brewstore/apps. It never handles NSP/NAND content.
 #include <switch.h>
+#include <switch/arm/counter.h>
 
 #include <ctype.h>
 #include <dirent.h>
@@ -37,6 +38,7 @@
 #define MANIFEST_PATH BREWSTORE_ROOT "/packages.json"
 #define CACHE_DIR BREWSTORE_ROOT "/cache"
 #define ICON_DIR CACHE_DIR "/icons"
+#define ASSET_CACHE_DIR CACHE_DIR "/assets"
 #define REPO_CACHE_DIR CACHE_DIR "/repos"
 #define REPOS_PATH BREWSTORE_ROOT "/repos.json"
 #define TEST_REPO_PATH BREWSTORE_ROOT "/test-repo.json"
@@ -46,12 +48,25 @@
 #define SHORTCUTS_PATH "sdmc:/switch/shortcuts.txt"
 #define DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/catalog.json"
 #define LEGACY_DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json"
+#define ASSET_URL_BASE "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/assets/"
+#define PROGRESS_ASSET_COUNT 6
+static const char* const kProgressAssets[PROGRESS_ASSET_COUNT] = {
+    "lisa-imai.gif",
+    "lisa-imai-imai-lisa.gif",
+    "lisa-imai-bang-dream.gif",
+    "lisa-imai-bandori.gif",
+    "lisa-imai-bang-dream-2.gif",
+    "lisa-imai-yukina-minato.gif",
+};
 #define VISIBLE_COLUMNS 3
 #define VISIBLE_ROWS 2
 #define VISIBLE_COUNT (VISIBLE_COLUMNS * VISIBLE_ROWS)
 #define LIST_VISIBLE_COUNT 8
 #define REPO_VISIBLE_ROWS 10
 #define VERSION_VISIBLE_ROWS 8
+
+extern const u8 lisa_imai_gif[];
+extern const u32 lisa_imai_gif_size;
 
 #define COLOR_BACKGROUND RGBA8(12, 14, 18, 255)
 #define COLOR_PANEL RGBA8(21, 24, 31, 255)
@@ -128,6 +143,10 @@ static bool g_network_ready;
 static char g_status[256];
 static char g_manifest_error[256];
 static bool g_cache_corrupt;
+static UiGif g_progress_gif;
+static bool g_progress_gif_loaded;
+static int g_progress_gif_frame;
+static u64 g_progress_gif_next_tick;
 static CachedIcon g_icons[24];
 static int g_icon_count;
 static Ui* g_ui;
@@ -693,7 +712,7 @@ static void draw_loading(Ui* ui, const char* message) {
     ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
     ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
     ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
-            "Codename YukinaMinato", 9, COLOR_MUTED);
+            "Codename LisaImai", 9, COLOR_MUTED);
     ui_text(ui, 24, 300, message, 18, COLOR_MUTED);
     ui_end(ui);
 }
@@ -928,7 +947,7 @@ static void draw_shop_content(Ui* ui) {
     ui_rect(ui, 0, 0, UI_WIDTH, 56, COLOR_PANEL);
     ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
     ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
-            "Codename YukinaMinato", 9, COLOR_MUTED);
+            "Codename LisaImai", 9, COLOR_MUTED);
     char filter_label[192];
     snprintf(filter_label, sizeof(filter_label), "%s · %s", filter_name(), sort_name());
     const int filter_width = ui_text_width(ui, filter_label, 13);
@@ -1291,8 +1310,8 @@ static void draw_versions(Ui* ui) {
 static void draw_settings(Ui* ui) {
     if (!ui)
         return;
-    if (g_setting_row > 4)
-        g_setting_row = 4;
+    if (g_setting_row > 5)
+        g_setting_row = 5;
 
     ui_begin(ui);
     ui_clear(ui, COLOR_BACKGROUND);
@@ -1327,8 +1346,14 @@ static void draw_settings(Ui* ui) {
 
     if (g_setting_row == 4)
         ui_rect(ui, 24, 360, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
-    ui_text(ui, 40, 370, "Clear catalog cache", 17, COLOR_TEXT);
-    ui_text(ui, 40, 396, "Delete downloaded manifests and refresh", 13, COLOR_MUTED);
+    ui_text(ui, 40, 370, "Animations", 17, COLOR_TEXT);
+    ui_text(ui, 40, 396, g_settings.animations ? "On" : "Off", 15,
+            g_settings.animations ? COLOR_ACCENT : COLOR_MUTED);
+
+    if (g_setting_row == 5)
+        ui_rect(ui, 24, 428, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 438, "Clear catalog cache", 17, COLOR_TEXT);
+    ui_text(ui, 40, 464, "Delete downloaded manifests and refresh", 13, COLOR_MUTED);
 
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
@@ -1357,6 +1382,19 @@ static void clear_catalog_cache(void) {
     path_mkdirs(REPO_CACHE_DIR);
     refresh_catalogs(true);
     set_status("Catalog cache cleared.");
+    draw_settings(g_ui);
+}
+
+static void toggle_animations(void) {
+    const bool previous = g_settings.animations;
+    g_settings.animations = !previous;
+    char error[128] = {0};
+    if (settings_save(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0) {
+        g_settings.animations = previous;
+        set_status("Could not save settings: %s", error);
+    } else {
+        set_status("Animations: %s.", g_settings.animations ? "On" : "Off");
+    }
     draw_settings(g_ui);
 }
 
@@ -1459,6 +1497,97 @@ static void draw_theme_bar(Ui* ui, int x, int y, int width, int height) {
     }
 }
 
+static void draw_progress_gif(Ui* ui) {
+    if (!ui || !g_settings.animations || !g_progress_gif_loaded ||
+        g_progress_gif.frame_count <= 0)
+        return;
+    const u64 now = svcGetSystemTick();
+    if (!g_progress_gif_next_tick)
+        g_progress_gif_next_tick = now + armGetSystemTickFreq() / 10;
+    if (now >= g_progress_gif_next_tick) {
+        g_progress_gif_frame = (g_progress_gif_frame + 1) % g_progress_gif.frame_count;
+        int delay = g_progress_gif.delays[g_progress_gif_frame];
+        if (delay < 20)
+            delay = 100;
+        if (delay > 1000)
+            delay = 1000;
+        g_progress_gif_next_tick =
+            now + (u64)delay * armGetSystemTickFreq() / 1000;
+    }
+    const int width = 480;
+    const int height = 270;
+    const u32* frame = g_progress_gif.pixels +
+                       (size_t)g_progress_gif_frame *
+                           (size_t)g_progress_gif.width *
+                           (size_t)g_progress_gif.height;
+    ui_image(ui, (UI_WIDTH - width) / 2, 400, width, height, frame,
+             g_progress_gif.width, g_progress_gif.height);
+}
+
+static int load_gif_file(const char* path, UiGif* gif) {
+    struct stat status;
+    if (stat(path, &status) != 0 || status.st_size <= 0 ||
+        status.st_size > 16 * 1024 * 1024)
+        return -1;
+    FILE* file = fopen(path, "rb");
+    if (!file)
+        return -1;
+    unsigned char* data = malloc((size_t)status.st_size);
+    const size_t read = data ? fread(data, 1, (size_t)status.st_size, file) : 0;
+    fclose(file);
+    const int result = data && read == (size_t)status.st_size
+                           ? ui_gif_load_memory(data, read, gif)
+                           : -1;
+    free(data);
+    return result;
+}
+
+static void progress_gif_begin(void) {
+    ui_gif_free(&g_progress_gif);
+    g_progress_gif_loaded = false;
+    g_progress_gif_frame = 0;
+    g_progress_gif_next_tick = 0;
+    if (!g_settings.animations)
+        return;
+    static bool seeded;
+    if (!seeded) {
+        srand((unsigned)time(NULL));
+        seeded = true;
+    }
+    const int index = rand() % PROGRESS_ASSET_COUNT;
+    const char* name = kProgressAssets[index];
+    char cache[512];
+    snprintf(cache, sizeof(cache), "%s/%s", ASSET_CACHE_DIR, name);
+    if (load_gif_file(cache, &g_progress_gif) == 0) {
+        g_progress_gif_loaded = true;
+        return;
+    }
+    remove(cache);
+    if (g_network_ready) {
+        char url[768];
+        char temporary[520];
+        char hash[65];
+        char error[128];
+        snprintf(url, sizeof(url), "%s%s", ASSET_URL_BASE, name);
+        snprintf(temporary, sizeof(temporary), "%s.new", cache);
+        path_mkdirs(ASSET_CACHE_DIR);
+        UiGif downloaded = {0};
+        if (http_download(url, temporary, hash, error, sizeof(error)) == 0 &&
+            load_gif_file(temporary, &downloaded) == 0) {
+            remove(cache);
+            if (rename(temporary, cache) == 0) {
+                g_progress_gif = downloaded;
+                g_progress_gif_loaded = true;
+                return;
+            }
+            ui_gif_free(&downloaded);
+        }
+        remove(temporary);
+    }
+    if (ui_gif_load_memory(lisa_imai_gif, lisa_imai_gif_size, &g_progress_gif) == 0)
+        g_progress_gif_loaded = true;
+}
+
 static void draw_download_progress(Ui* ui, const char* title,
                                    unsigned long long received,
                                    unsigned long long total) {
@@ -1476,7 +1605,7 @@ static void draw_download_progress(Ui* ui, const char* title,
     ui_text_truncated(ui, 28, 136, title, 17, COLOR_MUTED, UI_WIDTH - 56);
 
     const int bar_x = 28;
-    const int bar_y = 340;
+    const int bar_y = 260;
     const int bar_width = UI_WIDTH - 56;
     const int bar_height = 18;
     ui_rect(ui, bar_x, bar_y, bar_width, bar_height, COLOR_CARD);
@@ -1501,6 +1630,7 @@ static void draw_download_progress(Ui* ui, const char* title,
         ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
     }
     ui_text(ui, 28, 680, "B cancel", 13, COLOR_MUTED);
+    draw_progress_gif(ui);
     ui_end(ui);
 }
 
@@ -1541,6 +1671,7 @@ static void download_worker(void* user) {
 }
 
 static int run_download(DownloadJob* job, PadState* pad) {
+    progress_gif_begin();
     job->result = -1;
     job->running = true;
     job->cancel = false;
@@ -1576,7 +1707,7 @@ static int run_download(DownloadJob* job, PadState* pad) {
                 g_quit = true;
         }
         const u64 now = svcGetSystemTick();
-        if (!last_draw || now - last_draw >= frequency / 4) {
+        if (!last_draw || now - last_draw >= frequency / 12) {
             draw_download_progress(g_ui, job->title, job->received, job->total);
             last_draw = now;
         }
@@ -1616,7 +1747,7 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     ui_text_truncated(ui, 28, 132, step, 16, COLOR_MUTED, UI_WIDTH - 56);
 
     const int bar_x = 28;
-    const int bar_y = 340;
+    const int bar_y = 260;
     const int bar_width = UI_WIDTH - 56;
     const int bar_height = 18;
     ui_rect(ui, bar_x, bar_y, bar_width, bar_height, COLOR_CARD);
@@ -1633,6 +1764,7 @@ static void draw_install_progress(Ui* ui, const char* title, const char* step,
     char line[64];
     snprintf(line, sizeof(line), "%d%%", percent);
     ui_text(ui, bar_x, bar_y + 32, line, 15, COLOR_MUTED);
+    draw_progress_gif(ui);
     ui_end(ui);
 }
 
@@ -1654,7 +1786,7 @@ static void draw_uninstall_progress(Ui* ui, const char* title, int current, int 
         snprintf(step, sizeof(step), "%d / %d", current, total);
     ui_text_truncated(ui, 28, 132, step, 16, COLOR_MUTED, UI_WIDTH - 56);
     const int bar_x = 28;
-    const int bar_y = 340;
+    const int bar_y = 260;
     const int bar_width = UI_WIDTH - 56;
     const int bar_height = 18;
     ui_rect(ui, bar_x, bar_y, bar_width, bar_height, COLOR_CARD);
@@ -3417,7 +3549,7 @@ int main(void) {
                 g_setting_row--;
                 changed = true;
             } else if (((down & HidNpadButton_Down) || key_down) &&
-                       g_setting_row < 4) {
+                       g_setting_row < 5) {
                 g_setting_row++;
                 changed = true;
             } else if (g_setting_row == 2 &&
@@ -3429,6 +3561,10 @@ int main(void) {
                         key_left || key_right)) {
                 toggle_ignore_sha();
             } else if (g_setting_row == 4 &&
+                       ((down & (HidNpadButton_Left | HidNpadButton_Right)) ||
+                        key_left || key_right)) {
+                toggle_animations();
+            } else if (g_setting_row == 5 &&
                        ((down & HidNpadButton_A) || key_accept)) {
                 clear_catalog_cache();
             } else if ((down & HidNpadButton_A) || key_accept) {
@@ -3438,8 +3574,10 @@ int main(void) {
                     edit_proxy();
                 else if (g_setting_row == 2)
                     cycle_button_theme(1);
-                else
+                else if (g_setting_row == 3)
                     toggle_ignore_sha();
+                else
+                    toggle_animations();
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)

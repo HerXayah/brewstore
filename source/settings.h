@@ -24,6 +24,7 @@ typedef struct {
     int button_theme;
     int list_view;
     bool ignore_sha;
+    bool animations;
 } AppSettings;
 
 /// Loads settings.json, creating the default file when absent.

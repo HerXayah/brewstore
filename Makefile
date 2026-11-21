@@ -12,11 +12,11 @@ include $(DEVKITPRO)/libounce/switch2_rules
 TARGET		:=	brewstore
 BUILD		:=	build
 SOURCES		:=	source
-DATA		:=	data
+DATA		:=	assets
 INCLUDES	:=	include
 APP_TITLE	:=	brewstore
 APP_AUTHOR	:=	Miella Selene / Xayah
-APP_VERSION	:=	1.2.4
+APP_VERSION	:=	1.3
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -103,15 +103,15 @@ $(OUTPUT).elf	:	$(OFILES)
 #---------------------------------------------------------------------------------
 %.o: %.png
 	@echo $(notdir $<)
-	$(SILENTCMD)bin2s -a $< | $(AS) -o $@
+	$(SILENTCMD)bin2s -a 4 $< | $(AS) -o $@
 
 define bin2o
-	bin2s -a $< | $(AS) -o $(@)
+	bin2s -a 4 $< | $(AS) -o $(@)
 	echo "extern const u8" `(echo $(<F) | sed -e 's/^\([[:digit:]]\)\(.*\)$$/_\1\2/g' -e 's/[^A-Za-z0-9_]/_/g')`"[];" > `(echo $(<F) | sed -e 's/^\([[:digit:]]\)\(.*\)$$/_\1\2/g' -e 's/[^A-Za-z0-9_]/_/g')`.h
 	echo "extern const u32" `(echo $(<F) | sed -e 's/^\([[:digit:]]\)\(.*\)$$/_\1\2/g' -e 's/[^A-Za-z0-9_]/_/g')`"_size;" >> `(echo $(<F) | sed -e 's/^\([[:digit:]]\)\(.*\)$$/_\1\2/g' -e 's/[^A-Za-z0-9_]/_/g')`.h
 endef
 
-$(OFILES_BIN): %$(OFILES_BIN_SUFFIX): %
+$(OFILES_BIN): %.o: %
 	@echo $(notdir $<)
 	$(SILENTCMD)$(bin2o)
 
