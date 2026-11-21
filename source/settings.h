@@ -23,6 +23,7 @@ typedef struct {
     char download_proxy[256];
     int button_theme;
     int list_view;
+    bool ignore_sha;
 } AppSettings;
 
 /// Loads settings.json, creating the default file when absent.

@@ -269,13 +269,13 @@ static bool is_installed(const HbPackage* package) {
         char file[512];
         if (read_state(package, version, sizeof(version), hash, sizeof(hash),
                        file, sizeof(file), NULL, NULL)) {
-            if (file[0])
-                return access(file, F_OK) == 0;
+            if (file[0] && access(file, F_OK) == 0)
+                return true;
+            if (package->marker[0] && access(package->marker, F_OK) == 0)
+                return true;
             if (strcmp(package->target, "sdmc:/switch") != 0 &&
                 strcmp(package->target, "sdmc:/") != 0 &&
                 directory_nonempty(package->target))
-                return true;
-            if (package->marker[0] && access(package->marker, F_OK) == 0)
                 return true;
         }
     }
@@ -1234,8 +1234,8 @@ static void draw_versions(Ui* ui) {
 static void draw_settings(Ui* ui) {
     if (!ui)
         return;
-    if (g_setting_row > 2)
-        g_setting_row = 2;
+    if (g_setting_row > 4)
+        g_setting_row = 4;
 
     ui_begin(ui);
     ui_clear(ui, COLOR_BACKGROUND);
@@ -1262,6 +1262,16 @@ static void draw_settings(Ui* ui) {
     ui_text(ui, 40, 260, button_theme_name(g_settings.button_theme), 15,
             COLOR_ACCENT);
 
+    if (g_setting_row == 3)
+        ui_rect(ui, 24, 292, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 302, "Ignore SHA-256 mismatch (dangerous)", 17, COLOR_TEXT);
+    ui_text(ui, 40, 328, g_settings.ignore_sha ? "On" : "Off", 15,
+            g_settings.ignore_sha ? COLOR_ACCENT : COLOR_MUTED);
+
+    if (g_setting_row == 4)
+        ui_rect(ui, 24, 360, UI_WIDTH - 48, 62, COLOR_CARD_HOVER);
+    ui_text(ui, 40, 370, "Clear catalog cache", 17, COLOR_TEXT);
+    ui_text(ui, 40, 396, "Delete downloaded manifests and refresh", 13, COLOR_MUTED);
 
     ui_rect(ui, 0, 660, UI_WIDTH, 60, COLOR_PANEL);
     if (g_status[0])
@@ -1281,6 +1291,27 @@ static void cycle_button_theme(int delta) {
         set_status("Could not save settings: %s", error);
     } else {
         set_status("Button theme: %s.", button_theme_name(next));
+    }
+    draw_settings(g_ui);
+}
+
+static void clear_catalog_cache(void) {
+    path_remove_tree(REPO_CACHE_DIR);
+    path_mkdirs(REPO_CACHE_DIR);
+    refresh_catalogs(true);
+    set_status("Catalog cache cleared.");
+    draw_settings(g_ui);
+}
+
+static void toggle_ignore_sha(void) {
+    const bool previous = g_settings.ignore_sha;
+    g_settings.ignore_sha = !previous;
+    char error[128] = {0};
+    if (settings_save(SETTINGS_PATH, &g_settings, error, sizeof(error)) != 0) {
+        g_settings.ignore_sha = previous;
+        set_status("Could not save settings: %s", error);
+    } else {
+        set_status("Ignore SHA-256 mismatch: %s.", g_settings.ignore_sha ? "On" : "Off");
     }
     draw_settings(g_ui);
 }
@@ -1940,7 +1971,8 @@ static void install_package(const HbPackage* package, PadState* pad,
     char hash[65];
     snprintf(hash, sizeof(hash), "%s", job.hash);
     const char* expected_sha = choice ? choice->sha256 : package->sha256;
-    if (expected_sha[0] && strcasecmp(hash, expected_sha) != 0) {
+    if (!g_settings.ignore_sha && expected_sha[0] &&
+        strcasecmp(hash, expected_sha) != 0) {
         remove(cache);
         set_status("SHA-256 mismatch.");
         install_redraw();
@@ -1975,7 +2007,7 @@ static void install_package(const HbPackage* package, PadState* pad,
     if (asset_name[0]) {
         if (archive_is_archive(asset_name)) {
             capture_begin(&capture, package);
-            if (archive_extract(cache, asset_name, package->target, "", error, sizeof(error),
+            if (archive_extract(cache, asset_name, package->target, package->strip_prefix, error, sizeof(error),
                         extraction_progress, &capture) != 0) {
                 capture_cancel(&capture);
                 set_status("Extract failed: %s", error);
@@ -2220,7 +2252,7 @@ static bool batch_install(const PreparedPackage* prepared) {
     if (prepared->asset_name[0]) {
         if (archive_is_archive(prepared->asset_name)) {
             capture_begin(&capture, package);
-            if (archive_extract(prepared->cache, prepared->asset_name, package->target, "", error, sizeof(error),
+            if (archive_extract(prepared->cache, prepared->asset_name, package->target, package->strip_prefix, error, sizeof(error),
                         extraction_progress, &capture) != 0) {
                 capture_cancel(&capture);
                 set_status("Extract failed: %s", error);
@@ -2279,7 +2311,7 @@ static void install_selected_or_current(HbPackage* current, PadState* pad) {
         install_package(current, g_pad, NULL);
         return;
     }
-    PreparedPackage prepared[HBPKG_MAX_PACKAGES];
+    static PreparedPackage prepared[HBPKG_MAX_PACKAGES];
     int total = 0;
     for (int i = 0; i < g_manifest.count; i++) {
         if (is_marked(&g_manifest.items[i]))
@@ -2485,23 +2517,30 @@ static bool load_catalog_file(const char* path, const char* base, bool fetch,
         snprintf(err, err_size, "include depth exceeded");
         return false;
     }
-    HbManifest manifest;
-    if (manifest_load(path, &manifest, err, err_size) != 0) {
+    /* HbManifest is large; keep it off the stack so the include recursion
+     * does not overflow it as the catalog grows. */
+    HbManifest* manifest = malloc(sizeof(*manifest));
+    if (!manifest) {
+        (*failures)++;
+        return false;
+    }
+    if (manifest_load(path, manifest, err, err_size) != 0) {
         if (g_catalog_log)
             fprintf(g_catalog_log, "FAIL %s: %s\n", path, err);
         (*failures)++;
+        free(manifest);
         return false;
     }
     if (g_catalog_log)
         fprintf(g_catalog_log, "OK %s packages=%d includes=%d\n",
-                path, manifest.count, manifest.include_count);
-    append_catalog(&manifest);
+                path, manifest->count, manifest->include_count);
+    append_catalog(manifest);
 
-    for (int i = 0; i < manifest.include_count; i++) {
+    for (int i = 0; i < manifest->include_count; i++) {
         char included[640];
-        if (resolve_include(base, manifest.includes[i], included, sizeof(included)) != 0) {
+        if (resolve_include(base, manifest->includes[i], included, sizeof(included)) != 0) {
             if (g_catalog_log)
-                fprintf(g_catalog_log, "FAIL resolve %s\n", manifest.includes[i]);
+                fprintf(g_catalog_log, "FAIL resolve %s\n", manifest->includes[i]);
             (*failures)++;
             continue;
         }
@@ -2535,6 +2574,7 @@ static bool load_catalog_file(const char* path, const char* base, bool fetch,
                               err, err_size);
         }
     }
+    free(manifest);
     return true;
 }
 
@@ -2554,27 +2594,28 @@ static void refresh_catalogs(bool fetch) {
         snprintf(g_manifest_error, sizeof(g_manifest_error), "%s", error);
 
     if (access(TEST_REPO_PATH, F_OK) == 0) {
-        HbManifest test;
-        if (manifest_load(TEST_REPO_PATH, &test, error, sizeof(error)) == 0) {
-            for (int i = 0; i < test.count; i++) {
-                test.items[i].target_explicit = false;
-                test.items[i].readme_fallback = true;
-                if (strcmp(test.items[i].version, "test") == 0)
-                    snprintf(test.items[i].version, sizeof(test.items[i].version), "latest");
-                if (strcmp(test.items[i].author, "Git") == 0 ||
-                    strcmp(test.items[i].author, "Miella Selene / Xayah") == 0) {
+        HbManifest* test = malloc(sizeof(*test));
+        if (test && manifest_load(TEST_REPO_PATH, test, error, sizeof(error)) == 0) {
+            for (int i = 0; i < test->count; i++) {
+                test->items[i].target_explicit = false;
+                test->items[i].readme_fallback = true;
+                if (strcmp(test->items[i].version, "test") == 0)
+                    snprintf(test->items[i].version, sizeof(test->items[i].version), "latest");
+                if (strcmp(test->items[i].author, "Git") == 0 ||
+                    strcmp(test->items[i].author, "Miella Selene / Xayah") == 0) {
                     char owner[128];
                     char repo[128];
-                    if (github_repo_parts(test.items[i].url, owner, sizeof(owner),
+                    if (github_repo_parts(test->items[i].url, owner, sizeof(owner),
                                           repo, sizeof(repo)) == 0)
-                        snprintf(test.items[i].author, sizeof(test.items[i].author),
+                        snprintf(test->items[i].author, sizeof(test->items[i].author),
                                  "%.63s", owner);
                 }
             }
-            append_catalog(&test);
+            append_catalog(test);
         } else {
             failures++;
         }
+        free(test);
     }
 
     for (int i = 0; i < g_repos.count; i++) {
@@ -3158,20 +3199,29 @@ int main(void) {
                 g_setting_row--;
                 changed = true;
             } else if (((down & HidNpadButton_Down) || key_down) &&
-                       g_setting_row < 2) {
+                       g_setting_row < 4) {
                 g_setting_row++;
                 changed = true;
             } else if (g_setting_row == 2 &&
                        ((down & (HidNpadButton_Left | HidNpadButton_Right)) ||
                         key_left || key_right)) {
                 cycle_button_theme((down & HidNpadButton_Left) || key_left ? -1 : 1);
+            } else if (g_setting_row == 3 &&
+                       ((down & (HidNpadButton_Left | HidNpadButton_Right)) ||
+                        key_left || key_right)) {
+                toggle_ignore_sha();
+            } else if (g_setting_row == 4 &&
+                       ((down & HidNpadButton_A) || key_accept)) {
+                clear_catalog_cache();
             } else if ((down & HidNpadButton_A) || key_accept) {
                 if (g_setting_row == 0)
                     edit_default_path();
                 else if (g_setting_row == 1)
                     edit_proxy();
-                else
+                else if (g_setting_row == 2)
                     cycle_button_theme(1);
+                else
+                    toggle_ignore_sha();
             }
             memcpy(g_previous_keys, keyboard.keys, sizeof(g_previous_keys));
             if (changed)

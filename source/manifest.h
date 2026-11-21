@@ -6,8 +6,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define HBPKG_MAX_PACKAGES 64
-#define HBPKG_MAX_INCLUDES 64
+#define HBPKG_MAX_PACKAGES 1024
+#define HBPKG_MAX_INCLUDES 1024
 
 typedef struct {
     char name[64];

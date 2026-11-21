@@ -55,9 +55,9 @@ int settings_save(const char* path, const AppSettings* settings, char* err, size
     if (!file)
         return fail(err, err_size, "cannot create settings.json");
     fprintf(file,
-            "{\n  \"defaultInstallPath\": \"%s\",\n  \"downloadProxy\": \"%s\",\n  \"buttonTheme\": %d,\n  \"listView\": %d\n}\n",
+            "{\n  \"defaultInstallPath\": \"%s\",\n  \"downloadProxy\": \"%s\",\n  \"buttonTheme\": %d,\n  \"listView\": %d,\n  \"ignoreShaMismatch\": %d\n}\n",
             settings->default_install_path, settings->download_proxy, settings->button_theme,
-            settings->list_view ? 1 : 0);
+            settings->list_view ? 1 : 0, settings->ignore_sha ? 1 : 0);
     if (fclose(file) != 0) {
         remove(temporary);
         return fail(err, err_size, "cannot write settings.json");
@@ -76,6 +76,7 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
     settings->download_proxy[0] = '\0';
     settings->button_theme = DEFAULT_BUTTON_THEME;
     settings->list_view = 0;
+    settings->ignore_sha = false;
 
     FILE* file = fopen(path, "rb");
     if (!file) {
@@ -129,6 +130,19 @@ int settings_load(const char* path, AppSettings* settings, char* err, size_t err
             const int theme = atoi(number);
             if (theme >= 0 && theme < BUTTON_THEME_COUNT)
                 settings->button_theme = theme;
+            position = value + 1;
+            continue;
+        }
+        if (tokens[key].type == JSMN_STRING && tokens[value].type == JSMN_PRIMITIVE &&
+            (size_t)(tokens[key].end - tokens[key].start) == 17 &&
+            memcmp(text + tokens[key].start, "ignoreShaMismatch", 17) == 0) {
+            char number[8];
+            const size_t number_length = (size_t)(tokens[value].end - tokens[value].start);
+            if (number_length >= sizeof(number))
+                return fail(err, err_size, "ignoreShaMismatch is invalid");
+            memcpy(number, text + tokens[value].start, number_length);
+            number[number_length] = '\0';
+            settings->ignore_sha = atoi(number) != 0;
             position = value + 1;
             continue;
         }
