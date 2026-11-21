@@ -4,6 +4,7 @@
 #include "json_util.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,47 @@ static int valid_sha(const char* sha) {
             return 0;
     }
     return 1;
+}
+
+int hb_list_reserve(HbPackageList* list, int capacity) {
+    if (!list || capacity < 0 || capacity > HB_PACKAGES_SANITY_MAX)
+        return -1;
+    if (capacity <= list->capacity)
+        return 0;
+    int next = list->capacity > 0 ? list->capacity : 64;
+    while (next < capacity) {
+        if (next > HB_PACKAGES_SANITY_MAX / 2) {
+            next = HB_PACKAGES_SANITY_MAX;
+            break;
+        }
+        next *= 2;
+    }
+    if (next < capacity)
+        return -1;
+    HbPackage* items = realloc(list->items, sizeof(*items) * (size_t)next);
+    if (!items)
+        return -1;
+    list->items = items;
+    list->capacity = next;
+    return 0;
+}
+
+int hb_list_push(HbPackageList* list, const HbPackage* package) {
+    if (!list || !package || list->count >= HB_PACKAGES_SANITY_MAX)
+        return -1;
+    if (hb_list_reserve(list, list->count + 1) != 0)
+        return -1;
+    list->items[list->count++] = *package;
+    return 0;
+}
+
+void hb_list_free(HbPackageList* list) {
+    if (!list)
+        return;
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
 }
 
 int manifest_default_target(const char* name, char* target, size_t target_size) {
@@ -181,7 +223,7 @@ int manifest_load(const char* path, HbManifest* manifest, char* err, size_t err_
         pos = token_skip(tokens, object, count);
         if (object >= count || tokens[object].type != JSMN_OBJECT)
             continue;
-        if (manifest->count >= HBPKG_MAX_PACKAGES) {
+        if (manifest->count >= HBPKG_LEGACY_MAX_PACKAGES) {
             free(tokens);
             free(text);
             return fail(err, err_size, "too many packages in manifest");

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "count": 1,
+  "packages": [
+    {
+      "name": "example",
+      "title": "Example",
+      "author": "Tester",
+      "description": "Catalogue fixture.",
+      "url": "https://github.com/example/example",
+      "version": "1.0.0",
+      "release_tag": "v1.0.0",
+      "asset": "example.nro",
+      "download_url": "https://github.com/example/example/releases/download/v1.0.0/example.nro",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 100,
+      "published": 1790000000,
+      "target": "sdmc:/switch/example",
+      "marker": "sdmc:/switch/example/example.nro",
+      "stripPrefix": "bundle/"
+    }
+  ]
+}

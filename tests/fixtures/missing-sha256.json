@@ -1,0 +1,1 @@
+{"schema_version": 1, "count": 1, "packages": [{"name": "one", "url": "https://example.com", "asset": "one.nro", "download_url": "https://example.com/one.nro", "release_tag": "v1"}]}

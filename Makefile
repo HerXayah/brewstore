@@ -16,7 +16,7 @@ DATA		:=	data
 INCLUDES	:=	include
 APP_TITLE	:=	brewstore
 APP_AUTHOR	:=	Miella Selene / Xayah
-APP_VERSION	:=	1.2.3
+APP_VERSION	:=	1.2.4
 
 #---------------------------------------------------------------------------------
 # options for code generation

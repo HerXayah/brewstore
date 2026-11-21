@@ -14,10 +14,12 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "archive.h"
+#include "catalog.h"
 #include "github.h"
 #include "http.h"
 #include "manifest.h"
@@ -42,7 +44,8 @@
 #define README_DIR CACHE_DIR "/readme"
 #define SETTINGS_PATH BREWSTORE_ROOT "/settings.json"
 #define SHORTCUTS_PATH "sdmc:/switch/shortcuts.txt"
-#define DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json"
+#define DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/catalog.json"
+#define LEGACY_DEFAULT_REPO_URL "https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json"
 #define VISIBLE_COLUMNS 3
 #define VISIBLE_ROWS 2
 #define VISIBLE_COUNT (VISIBLE_COLUMNS * VISIBLE_ROWS)
@@ -69,16 +72,18 @@ typedef struct {
     int height;
 } CachedIcon;
 
-static HbManifest g_manifest;
+static HbPackageList g_manifest;
 static RepoList g_repos;
 static int g_selected;
 enum { FILTER_ALL = 0, FILTER_UPDATES, FILTER_INSTALLED, FILTER_NOT_INSTALLED };
 static int g_filter;
-static HbPackage* g_visible[HBPKG_MAX_PACKAGES];
+static HbPackage** g_visible;
 static int g_visible_count;
+static int g_visible_capacity;
 static bool g_visible_dirty = true;
-static char g_marked[HBPKG_MAX_PACKAGES][64];
+static char (*g_marked)[64];
 static int g_marked_count;
+static int g_marked_capacity;
 enum { SORT_NAME = 0, SORT_AUTHOR, SORT_UPDATED };
 static int g_sort;
 static bool g_sort_reverse;
@@ -122,6 +127,7 @@ static int g_repo_scroll;
 static bool g_network_ready;
 static char g_status[256];
 static char g_manifest_error[256];
+static bool g_cache_corrupt;
 static CachedIcon g_icons[24];
 static int g_icon_count;
 static Ui* g_ui;
@@ -303,11 +309,13 @@ typedef struct {
     unsigned long long updated_at;
 } InstalledState;
 
-static InstalledState g_installed[HBPKG_MAX_PACKAGES];
+static InstalledState* g_installed;
+static int g_installed_capacity;
 
 static void invalidate_visible(void) {
     g_visible_dirty = true;
-    memset(g_installed, 0, sizeof(g_installed));
+    if (g_installed && g_installed_capacity > 0)
+        memset(g_installed, 0, sizeof(*g_installed) * (size_t)g_installed_capacity);
 }
 
 static unsigned long long package_published_timestamp(const HbPackage* package) {
@@ -361,10 +369,49 @@ static bool package_matches_search(const HbPackage* package) {
     return strcasestr(package->name, g_search) || strcasestr(package->title, g_search);
 }
 
+static int ensure_visible_capacity(int needed) {
+    if (needed <= g_visible_capacity)
+        return 0;
+    HbPackage** items = realloc(g_visible, sizeof(*items) * (size_t)needed);
+    if (!items)
+        return -1;
+    g_visible = items;
+    g_visible_capacity = needed;
+    return 0;
+}
+
+static int ensure_installed_capacity(int needed) {
+    if (needed <= g_installed_capacity)
+        return 0;
+    InstalledState* items = realloc(g_installed, sizeof(*items) * (size_t)needed);
+    if (!items)
+        return -1;
+    memset(items + g_installed_capacity, 0,
+           sizeof(*items) * (size_t)(needed - g_installed_capacity));
+    g_installed = items;
+    g_installed_capacity = needed;
+    return 0;
+}
+
+static int ensure_marked_capacity(int needed) {
+    if (needed <= g_marked_capacity)
+        return 0;
+    char (*items)[64] = realloc(g_marked, sizeof(*items) * (size_t)needed);
+    if (!items)
+        return -1;
+    g_marked = items;
+    g_marked_capacity = needed;
+    return 0;
+}
+
 static void rebuild_visible(void) {
     if (!g_visible_dirty)
         return;
     g_visible_count = 0;
+    if (ensure_visible_capacity(g_manifest.count) != 0) {
+        g_visible_dirty = false;
+        return;
+    }
     for (int i = 0; i < g_manifest.count; i++) {
         const InstalledState* state = package_state(&g_manifest.items[i]);
         bool match = true;
@@ -407,7 +454,7 @@ static void toggle_mark(const HbPackage* package) {
             return;
         }
     }
-    if (g_marked_count < HBPKG_MAX_PACKAGES)
+    if (ensure_marked_capacity(g_marked_count + 1) == 0)
         snprintf(g_marked[g_marked_count++], sizeof(g_marked[0]), "%s", package->name);
 }
 
@@ -882,17 +929,27 @@ static void draw_shop_content(Ui* ui) {
     ui_text(ui, 24, 14, "brewstore", 24, COLOR_TEXT);
     ui_text(ui, 24 + ui_text_width(ui, "brewstore", 24) + 10, 27,
             "Codename YukinaMinato", 9, COLOR_MUTED);
-    char list_label[192];
-    if (g_search[0])
-        snprintf(list_label, sizeof(list_label), "Search: %s", g_search);
-    else
-        snprintf(list_label, sizeof(list_label), "%s · %s", filter_name(), sort_name());
-    const int filter_width = ui_text_width(ui, list_label, 13);
+    char filter_label[192];
+    snprintf(filter_label, sizeof(filter_label), "%s · %s", filter_name(), sort_name());
+    const int filter_width = ui_text_width(ui, filter_label, 13);
     int filter_x = UI_WIDTH - 32 - filter_width;
     if (filter_x < 360)
         filter_x = 360;
-    ui_text_truncated(ui, filter_x, 25, list_label, 13, COLOR_ACCENT,
+    ui_text_truncated(ui, filter_x, 25, filter_label, 13, COLOR_ACCENT,
                       UI_WIDTH - 24 - filter_x);
+    if (g_search[0]) {
+        char search_label[192];
+        snprintf(search_label, sizeof(search_label), "Search: %s", g_search);
+        const int min_search_x = 300;
+        const int available = filter_x - 16 - min_search_x;
+        if (available >= 40) {
+            int search_width = ui_text_width(ui, search_label, 13);
+            if (search_width > available)
+                search_width = available;
+            ui_text_truncated(ui, filter_x - 16 - search_width, 25, search_label,
+                              13, COLOR_TEXT, search_width);
+        }
+    }
 
     if (!g_manifest.count) {
         ui_text(ui, 24, 104, "Nothing here yet", 26, COLOR_TEXT);
@@ -1379,6 +1436,8 @@ typedef struct {
     volatile unsigned long long received;
     volatile unsigned long long total;
     unsigned long long expected_total;
+    unsigned long long size_limit;
+    volatile bool size_exceeded;
     const char* title;
     char url[1024];
     char cache[512];
@@ -1450,6 +1509,22 @@ static void download_progress_callback(unsigned long long received,
     DownloadJob* job = user;
     job->received = received;
     job->total = total ? total : job->expected_total;
+    if (job->size_limit && received > job->size_limit + 65536) {
+        job->size_exceeded = true;
+        job->cancel = true;
+    }
+}
+
+static bool has_free_space(unsigned long long bytes) {
+    if (!bytes)
+        return true;
+    struct statvfs fs;
+    if (statvfs("sdmc:/", &fs) != 0)
+        return true;
+    const unsigned long long available =
+        (unsigned long long)fs.f_bavail * (unsigned long long)fs.f_frsize;
+    const unsigned long long needed = bytes + bytes / 20 + 16 * 1024 * 1024;
+    return available >= needed;
 }
 
 static bool download_cancel_callback(void* user) {
@@ -1923,6 +1998,11 @@ static void install_package(const HbPackage* package, PadState* pad,
     if (choice) {
         snprintf(url, sizeof(url), "%s", choice->url);
         snprintf(asset_name, sizeof(asset_name), "%s", choice->asset);
+    } else if (package->download_url[0]) {
+        snprintf(url, sizeof(url), "%s", package->download_url);
+        snprintf(asset_name, sizeof(asset_name), "%s", package->asset);
+        if (package->size_known)
+            asset_size = package->size;
     } else if (package->release[0] || is_plain_github_repo(package->url)) {
         set_status("Finding latest release for %s ...", package->title);
         install_redraw();
@@ -1944,6 +2024,12 @@ static void install_package(const HbPackage* package, PadState* pad,
         snprintf(asset_name, sizeof(asset_name), "package.zip");
     }
 
+    if (asset_size && !has_free_space(asset_size)) {
+        set_status("Not enough free SD space for %s.", package->title);
+        install_redraw();
+        return;
+    }
+
     char cache[512];
     snprintf(cache, sizeof(cache), CACHE_DIR "/%s", asset_name[0] ? "release-asset" : "package.zip");
     set_status("Downloading %s ...", package->title);
@@ -1954,12 +2040,16 @@ static void install_package(const HbPackage* package, PadState* pad,
     snprintf(job.url, sizeof(job.url), "%s", url);
     snprintf(job.cache, sizeof(job.cache), "%s", cache);
     job.expected_total = asset_size;
+    job.size_limit = asset_size;
     job.title = package->title;
     const int download_result = run_download(&job, pad);
     if (download_result == -2 || job.cancel) {
         g_ignore_b = true;
         g_batch_stop = true;
-        set_status("Download cancelled.");
+        if (job.size_exceeded)
+            set_status("Download exceeded the expected asset size.");
+        else
+            set_status("Download cancelled.");
         install_redraw();
         return;
     }
@@ -2183,7 +2273,12 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
     char url[1024] = "";
     char error[128] = {0};
     unsigned long long asset_size = 0;
-    if (package->release[0] || is_plain_github_repo(package->url)) {
+    if (package->download_url[0]) {
+        snprintf(url, sizeof(url), "%s", package->download_url);
+        snprintf(prepared->asset_name, sizeof(prepared->asset_name), "%s", package->asset);
+        if (package->size_known)
+            asset_size = package->size;
+    } else if (package->release[0] || is_plain_github_repo(package->url)) {
         if (release_latest_asset(package->url, package->asset, CACHE_DIR "/release.json",
                                  url, sizeof(url), prepared->asset_name,
                                  sizeof(prepared->asset_name), &asset_size,
@@ -2207,6 +2302,7 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
     snprintf(job.url, sizeof(job.url), "%s", url);
     snprintf(job.cache, sizeof(job.cache), "%s", prepared->cache);
     job.expected_total = asset_size;
+    job.size_limit = asset_size;
     job.title = package->title;
     const int result = run_download(&job, g_pad);
     if (result == -2 || job.cancel) {
@@ -2221,6 +2317,13 @@ static bool batch_prepare(PreparedPackage* prepared, HbPackage* package, int ind
         return false;
     }
     snprintf(prepared->hash, sizeof(prepared->hash), "%s", job.hash);
+    const char* expected_sha = package->sha256;
+    if (!g_settings.ignore_sha && expected_sha[0] &&
+        strcasecmp(prepared->hash, expected_sha) != 0) {
+        snprintf(prepared->error, sizeof(prepared->error), "SHA-256 mismatch");
+        remove(prepared->cache);
+        return false;
+    }
     prepared->ok = true;
     return true;
 }
@@ -2311,7 +2414,6 @@ static void install_selected_or_current(HbPackage* current, PadState* pad) {
         install_package(current, g_pad, NULL);
         return;
     }
-    static PreparedPackage prepared[HBPKG_MAX_PACKAGES];
     int total = 0;
     for (int i = 0; i < g_manifest.count; i++) {
         if (is_marked(&g_manifest.items[i]))
@@ -2319,6 +2421,11 @@ static void install_selected_or_current(HbPackage* current, PadState* pad) {
     }
     if (!total)
         return;
+    PreparedPackage* prepared = calloc((size_t)total, sizeof(*prepared));
+    if (!prepared) {
+        set_status("Out of memory preparing batch install.");
+        return;
+    }
 
     g_batch_active = true;
     g_batch_stop = false;
@@ -2353,6 +2460,7 @@ static void install_selected_or_current(HbPackage* current, PadState* pad) {
     g_batch_total = 0;
     g_batch_completed = 0;
     clear_marks();
+    free(prepared);
     clamp_selection();
     draw_shop(g_ui);
 }
@@ -2450,41 +2558,49 @@ static void context_action(void) {
     }
 }
 
-static void append_catalog(const HbManifest* source) {
-    for (int i = 0; i < source->count && g_manifest.count < HBPKG_MAX_PACKAGES; i++) {
-        bool duplicate = false;
-        for (int existing = 0; existing < g_manifest.count; existing++) {
-            if (strcmp(g_manifest.items[existing].name, source->items[i].name) == 0) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate) {
-            HbPackage package = source->items[i];
-            if (!package.target_explicit) {
-                const size_t path_length = strlen(g_settings.default_install_path);
-                const size_t name_length = strlen(package.name);
-                if (path_length + 1 + name_length + 1 <= sizeof(package.target)) {
-                    memcpy(package.target, g_settings.default_install_path, path_length);
-                    package.target[path_length] = '/';
-                    memcpy(package.target + path_length + 1, package.name,
-                           name_length + 1);
-                } else {
-                    snprintf(package.target, sizeof(package.target),
-                             "sdmc:/switch/%.63s", package.name);
-                }
-            }
-            if (strcmp(package.author, "Unknown") == 0) {
-                char owner[128];
-                char repo[128];
-                if (github_repo_parts(package.url, owner, sizeof(owner),
-                                      repo, sizeof(repo)) == 0)
-                    snprintf(package.author, sizeof(package.author), "%.63s", owner);
-            }
-            g_manifest.items[g_manifest.count++] = package;
+static bool append_package(HbPackage package) {
+    if (g_manifest.count >= HB_PACKAGES_SANITY_MAX) {
+        snprintf(g_manifest_error, sizeof(g_manifest_error),
+                 "catalogue exceeds %d packages", HB_PACKAGES_SANITY_MAX);
+        return false;
+    }
+    for (int existing = 0; existing < g_manifest.count; existing++) {
+        if (strcasecmp(g_manifest.items[existing].name, package.name) == 0)
+            return true;
+    }
+    if (!package.target_explicit) {
+        const size_t path_length = strlen(g_settings.default_install_path);
+        const size_t name_length = strlen(package.name);
+        if (path_length + 1 + name_length + 1 <= sizeof(package.target)) {
+            memcpy(package.target, g_settings.default_install_path, path_length);
+            package.target[path_length] = '/';
+            memcpy(package.target + path_length + 1, package.name,
+                   name_length + 1);
+        } else {
+            snprintf(package.target, sizeof(package.target),
+                     "sdmc:/switch/%.63s", package.name);
         }
     }
+    if (strcmp(package.author, "Unknown") == 0) {
+        char owner[128];
+        char repo[128];
+        if (github_repo_parts(package.url, owner, sizeof(owner),
+                              repo, sizeof(repo)) == 0)
+            snprintf(package.author, sizeof(package.author), "%.63s", owner);
+    }
+    if (hb_list_push(&g_manifest, &package) != 0) {
+        snprintf(g_manifest_error, sizeof(g_manifest_error),
+                 "out of memory adding %s", package.name);
+        return false;
+    }
+    return true;
 }
+
+static void append_catalog(const HbManifest* source) {
+    for (int i = 0; i < source->count; i++)
+        append_package(source->items[i]);
+}
+
 
 static void repo_cache_path(const char* url, char* out, size_t out_size) {
     u32 hash = 2166136261u;
@@ -2493,6 +2609,61 @@ static void repo_cache_path(const char* url, char* out, size_t out_size) {
         hash *= 16777619u;
     }
     snprintf(out, out_size, REPO_CACHE_DIR "/%08x.json", hash);
+}
+
+static int validate_cache_file(const char* path, char* err, size_t err_size) {
+    HbPackageList list = {0};
+    CatalogStats stats;
+    const int catalog_result = catalog_load(path, &list, &stats, err, err_size);
+    hb_list_free(&list);
+    if (catalog_result == 0)
+        return 0;
+    if (catalog_result == -1)
+        return -1;
+
+    HbManifest* manifest = malloc(sizeof(*manifest));
+    if (!manifest)
+        return -1;
+    const int result = manifest_load(path, manifest, err, err_size);
+    free(manifest);
+    return result == 0 ? 0 : -1;
+}
+
+static int fill_cache(const char* url, const char* cache, bool fetch,
+                      char* err, size_t err_size) {
+    char validation_error[256] = "";
+    const bool cache_exists = access(cache, F_OK) == 0;
+    const bool have_old = cache_exists &&
+                          validate_cache_file(cache, validation_error,
+                                              sizeof(validation_error)) == 0;
+    if (cache_exists && !have_old) {
+        remove(cache);
+        g_cache_corrupt = true;
+        if (!fetch)
+            snprintf(err, err_size, "catalog cache was corrupt");
+    }
+    if (!fetch && have_old)
+        return 0;
+    if (!g_network_ready)
+        return have_old ? 0 : -1;
+
+    char temporary[700];
+    snprintf(temporary, sizeof(temporary), "%s.new", cache);
+    char hash[65];
+    if (http_download(url, temporary, hash, err, err_size) != 0) {
+        remove(temporary);
+        return have_old ? 0 : -1;
+    }
+    if (validate_cache_file(temporary, err, err_size) != 0) {
+        remove(temporary);
+        return have_old ? 0 : -1;
+    }
+    remove(cache);
+    if (rename(temporary, cache) != 0) {
+        remove(temporary);
+        return have_old ? 0 : -1;
+    }
+    return 0;
 }
 
 static int resolve_include(const char* base, const char* include,
@@ -2515,6 +2686,26 @@ static bool load_catalog_file(const char* path, const char* base, bool fetch,
                               int depth, int* failures, char* err, size_t err_size) {
     if (depth > 8) {
         snprintf(err, err_size, "include depth exceeded");
+        return false;
+    }
+    HbPackageList catalog_list = {0};
+    CatalogStats catalog_stats;
+    const int catalog_result = catalog_load(path, &catalog_list, &catalog_stats,
+                                            err, err_size);
+    if (catalog_result == 0) {
+        for (int i = 0; i < catalog_list.count; i++)
+            append_package(catalog_list.items[i]);
+        if (g_catalog_log)
+            fprintf(g_catalog_log, "OK %s catalogue packages=%d skipped=%d\n",
+                    path, catalog_stats.packages, catalog_stats.skipped);
+        hb_list_free(&catalog_list);
+        return true;
+    }
+    hb_list_free(&catalog_list);
+    if (catalog_result == -1) {
+        if (g_catalog_log)
+            fprintf(g_catalog_log, "FAIL %s: %s\n", path, err);
+        (*failures)++;
         return false;
     }
     /* HbManifest is large; keep it off the stack so the include recursion
@@ -2547,19 +2738,10 @@ static bool load_catalog_file(const char* path, const char* base, bool fetch,
         if (strncmp(included, "https://", 8) == 0) {
             char cache[640];
             repo_cache_path(included, cache, sizeof(cache));
-            if ((fetch || access(cache, F_OK) != 0) && g_network_ready) {
-                char hash[65];
-                char download_error[128];
-                if (http_download(included, cache, hash, download_error,
-                                  sizeof(download_error)) != 0) {
-                    if (g_catalog_log)
-                        fprintf(g_catalog_log, "FAIL download %s: %s\n",
-                                included, download_error);
-                    (*failures)++;
-                    continue;
-                }
-            }
-            if (access(cache, F_OK) != 0) {
+            if (fill_cache(included, cache, fetch, err, err_size) != 0) {
+                if (g_catalog_log)
+                    fprintf(g_catalog_log, "FAIL download %s: %s\n",
+                            included, err);
                 (*failures)++;
                 continue;
             }
@@ -2579,11 +2761,15 @@ static bool load_catalog_file(const char* path, const char* base, bool fetch,
 }
 
 static void refresh_catalogs(bool fetch) {
+    /* g_manifest.items may be reallocated only during this refresh. No UI/state
+     * pointer may survive across it; g_visible and package_state use indices
+     * or are rebuilt after loading. */
     icon_prefetch_stop();
     char error[256] = {0};
     int failures = 0;
-    g_manifest.count = 0;
+    hb_list_free(&g_manifest);
     g_manifest_error[0] = '\0';
+    g_cache_corrupt = false;
     invalidate_visible();
     path_mkdirs(REPO_CACHE_DIR);
     g_catalog_log = fopen(CACHE_DIR "/catalog.log", "w");
@@ -2623,23 +2809,10 @@ static void refresh_catalogs(bool fetch) {
             continue;
         char cache[640];
         repo_cache_path(g_repos.urls[i], cache, sizeof(cache));
-        bool present = access(cache, F_OK) == 0;
-        if ((fetch || !present) && g_network_ready) {
-            char hash[65];
-            char download_error[128];
-            if (http_download(g_repos.urls[i], cache, hash, download_error,
-                              sizeof(download_error)) != 0) {
-                if (g_catalog_log)
-                    fprintf(g_catalog_log, "FAIL repo %s: %s\n",
-                            g_repos.urls[i], download_error);
-                failures++;
-                if (!present)
-                    continue;
-            } else {
-                present = true;
-            }
-        }
-        if (!present) {
+        if (fill_cache(g_repos.urls[i], cache, fetch, error, sizeof(error)) != 0) {
+            if (g_catalog_log)
+                fprintf(g_catalog_log, "FAIL repo %s: %s\n",
+                        g_repos.urls[i], error);
             failures++;
             continue;
         }
@@ -2654,19 +2827,29 @@ static void refresh_catalogs(bool fetch) {
         g_catalog_log = NULL;
     }
 
+    if (ensure_installed_capacity(g_manifest.count) != 0)
+        snprintf(g_manifest_error, sizeof(g_manifest_error), "out of memory for installed state");
+    else
+        ensure_visible_capacity(g_manifest.count);
     clamp_selection();
 
     if (!g_manifest.count) {
-        if (g_manifest_error[0])
+        if (g_cache_corrupt)
+            set_status("No packages: catalog cache was corrupt; reconnect to refresh.");
+        else if (g_manifest_error[0])
             set_status("No packages: %s", g_manifest_error);
         else if (!g_repos.count)
             set_status("No repositories. Press R to add one.");
         else
             set_status("No packages loaded. Press R to add a catalog.");
     } else {
-        set_status("Loaded %d package%s%s", g_manifest.count,
-                   g_manifest.count == 1 ? "" : "s",
-                   failures ? " (some catalogs unavailable)" : "");
+        if (g_cache_corrupt)
+            set_status("Loaded %d package%s; catalog cache was corrupt.",
+                       g_manifest.count, g_manifest.count == 1 ? "" : "s");
+        else
+            set_status("Loaded %d package%s%s", g_manifest.count,
+                       g_manifest.count == 1 ? "" : "s",
+                       failures ? " (some catalogs unavailable)" : "");
     }
 }
 
@@ -3018,6 +3201,38 @@ static void migrate_brewstore_root(void) {
                         "sdmc:/brewstore/apps/");
 }
 
+static void migrate_default_repository(void) {
+    int new_index = -1;
+    for (int i = 0; i < g_repos.count; i++)
+        if (strcmp(g_repos.urls[i], DEFAULT_REPO_URL) == 0) {
+            new_index = i;
+            break;
+        }
+    bool changed = false;
+    for (int i = 0; i < g_repos.count; ) {
+        if (strcmp(g_repos.urls[i], LEGACY_DEFAULT_REPO_URL) != 0) {
+            i++;
+            continue;
+        }
+        if (new_index >= 0 && new_index != i) {
+            g_repos.enabled[new_index] = g_repos.enabled[new_index] || g_repos.enabled[i];
+            repos_remove(&g_repos, i);
+            if (i < new_index)
+                new_index--;
+        } else {
+            snprintf(g_repos.urls[i], sizeof(g_repos.urls[i]), "%s", DEFAULT_REPO_URL);
+            new_index = i;
+        }
+        changed = true;
+        i++;
+    }
+    if (changed) {
+        char error[128] = {0};
+        if (repos_save(REPOS_PATH, &g_repos, error, sizeof(error)) != 0)
+            snprintf(g_status, sizeof(g_status), "repos.json migration failed: %s", error);
+    }
+}
+
 int main(void) {
     Ui ui;
     char error[256] = {0};
@@ -3046,10 +3261,13 @@ int main(void) {
 
     if (repos_load(REPOS_PATH, &g_repos, error, sizeof(error)) != 0) {
         snprintf(g_status, sizeof(g_status), "repos.json: %s", error);
-    } else if (g_repos.count == 0) {
-        repos_add(&g_repos, DEFAULT_REPO_URL);
-        if (repos_save(REPOS_PATH, &g_repos, error, sizeof(error)) != 0)
-            snprintf(g_status, sizeof(g_status), "repos.json: %s", error);
+    } else {
+        migrate_default_repository();
+        if (g_repos.count == 0) {
+            repos_add(&g_repos, DEFAULT_REPO_URL);
+            if (repos_save(REPOS_PATH, &g_repos, error, sizeof(error)) != 0)
+                snprintf(g_status, sizeof(g_status), "repos.json: %s", error);
+        }
     }
 
     g_network_ready = http_global_init(error, sizeof(error)) == 0;

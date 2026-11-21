@@ -1,0 +1,14 @@
+ - The transient legacy HbManifest still uses a fixed 1024-package array by design; only the
+   global catalogue is dynamic.
+ - The 5,000-package test covers the list implementation, not full UI rendering.
+ - ETag/304 support was not added; the HTTP layer does not expose response headers.
+ - Catalogue skip reasons are counted, but only the aggregate count is written to catalog.log;
+   per-entry reason text is not yet preserved.
+ - Cache failure/retention was exercised by code inspection, not by a host test, because the
+   cache path depends on the libnx HTTP layer.
+ - No on-device install test was possible here; catalogue install was compile-verified and
+   covered by code paths, but not run on hardware.
+ - Extraction was not changed; only the existing path-safety/size/symlink behavior is relied on.
+   No new extraction tests were added in this phase.
+ - statvfs is used directly for free-space checking; if it fails, the install is allowed rather
+   than blocked.

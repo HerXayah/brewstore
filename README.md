@@ -52,11 +52,16 @@ sdmc:/switch/brewstore.nro
 On first launch, `repos.json` is created with:
 
 ```text
-https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json
+https://raw.githubusercontent.com/HerXayah/brewstore-repo/main/catalog.json
 ```
 
-The catalog is hosted in the `brewstore-repo` Git repository. Its
-`packages.json` is an include index:
+`catalog.json` is a generated, fully resolved catalogue: each package has a
+direct HTTPS `download_url` and a SHA-256. Brewstore no longer needs to resolve
+GitHub releases on the console.
+
+Existing installs that still have the old
+`.../main/packages.json` default are migrated in place on startup. That legacy
+include index remains supported for third-party repositories:
 
 ```json
 {
@@ -66,7 +71,8 @@ The catalog is hosted in the `brewstore-repo` Git repository. Its
 }
 ```
 
-Each package manifest lives under `packages/<name>/manifest.json`.
+Each source package still lives under `packages/<name>/manifest.json` in
+[brewstore-repo](https://github.com/HerXayah/brewstore-repo).
 
 ## License
 

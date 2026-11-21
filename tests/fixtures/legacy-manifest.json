@@ -1,0 +1,17 @@
+{
+  "packages": [
+    {
+      "name": "example",
+      "title": "Example",
+      "author": "Tester",
+      "description": "Legacy fixture.",
+      "version": "1.0.0",
+      "url": "https://github.com/example/example",
+      "asset": "example.nro",
+      "target": "sdmc:/switch/example",
+      "marker": "sdmc:/switch/example/example.nro",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "published": 1790000000
+    }
+  ]
+}

@@ -6,8 +6,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define HBPKG_MAX_PACKAGES 1024
+#define HBPKG_LEGACY_MAX_PACKAGES 1024
 #define HBPKG_MAX_INCLUDES 1024
+#define HB_PACKAGES_SANITY_MAX 20000
 
 typedef struct {
     char name[64];
@@ -16,7 +17,9 @@ typedef struct {
     char description[512];
     char icon[512];
     char release[16];
-    char asset[64];
+    char release_tag[64];
+    char asset[128];
+    char download_url[1024];
     char version[32];
     char published[24];
     char url[512];
@@ -28,14 +31,29 @@ typedef struct {
     bool target_explicit;
     bool readme_fallback;
     bool shortcut;
+    bool size_known;
+    unsigned long long size;
 } HbPackage;
 
 typedef struct {
-    HbPackage items[HBPKG_MAX_PACKAGES];
+    HbPackage items[HBPKG_LEGACY_MAX_PACKAGES];
     int count;
     char includes[HBPKG_MAX_INCLUDES][256];
     int include_count;
 } HbManifest;
+
+typedef struct {
+    HbPackage* items;
+    int count;
+    int capacity;
+} HbPackageList;
+
+/// Ensures room for at least `capacity` packages. Returns 0 on success.
+int hb_list_reserve(HbPackageList* list, int capacity);
+/// Appends a package. Returns 0 on success, -1 on allocation failure.
+int hb_list_push(HbPackageList* list, const HbPackage* package);
+/// Releases the list and resets it.
+void hb_list_free(HbPackageList* list);
 
 /// Reads and validates a manifest. Returns 0 on success, -1 on failure with a
 /// human-readable message in err.

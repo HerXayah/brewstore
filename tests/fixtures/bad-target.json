@@ -1,0 +1,1 @@
+{"schema_version": 1, "count": 1, "packages": [{"name": "one", "url": "https://example.com", "asset": "one.nro", "download_url": "https://example.com/one.nro", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "release_tag": "v1", "target": "sdmc:/atmosphere/x"}]}

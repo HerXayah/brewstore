@@ -58,7 +58,7 @@ static int utf8_append(char* out, size_t out_size, size_t* used, unsigned codepo
     return 0;
 }
 
-int json_token_string(const char* json, const jsmntok_t* token, char* out, size_t out_size) {
+static int token_string_impl(const char* json, const jsmntok_t* token, char* out, size_t out_size, bool strict) {
     if (!token || token->end < token->start || !out_size)
         return -1;
     if (token->type == JSMN_PRIMITIVE) {
@@ -75,7 +75,12 @@ int json_token_string(const char* json, const jsmntok_t* token, char* out, size_
     const char* input = json + token->start;
     const char* end = json + token->end;
     size_t used = 0;
-    while (input < end && used + 1 < out_size) {
+    while (input < end) {
+        if (used + 1 >= out_size) {
+            if (strict)
+                return -1;
+            break;
+        }
         if (*input != '\\') {
             out[used++] = *input++;
             continue;
@@ -115,6 +120,30 @@ int json_token_string(const char* json, const jsmntok_t* token, char* out, size_
         }
     }
     out[used] = '\0';
+    return 0;
+}
+
+int json_token_string(const char* json, const jsmntok_t* token, char* out, size_t out_size) {
+    return token_string_impl(json, token, out, out_size, false);
+}
+
+int json_token_string_strict(const char* json, const jsmntok_t* token, char* out, size_t out_size) {
+    return token_string_impl(json, token, out, out_size, true);
+}
+
+int json_object_has(const char* json, const jsmntok_t* tokens, int count,
+                    int object, const char* key) {
+    if (object < 0 || object >= count || tokens[object].type != JSMN_OBJECT)
+        return 0;
+    int pos = object + 1;
+    for (int pair = 0; pair < tokens[object].size && pos < count; pair++) {
+        const int value = pos + 1;
+        char name[64];
+        if (json_token_string(json, &tokens[pos], name, sizeof(name)) == 0 &&
+            strcmp(name, key) == 0 && value < count)
+            return 1;
+        pos = json_token_skip(tokens, value, count);
+    }
     return 0;
 }
 
