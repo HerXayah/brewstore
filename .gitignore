@@ -5,3 +5,5 @@ build/
 *.map
 *.lst
 BUGS.md
+
+tests/test_catalog

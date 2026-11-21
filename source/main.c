@@ -3333,6 +3333,31 @@ static void migrate_brewstore_root(void) {
                         "sdmc:/brewstore/apps/");
 }
 
+static bool is_legacy_default_repository(const char* url) {
+    if (!url)
+        return false;
+    const char* host = url;
+    if (strncmp(host, "https://", 8) == 0)
+        host += 8;
+    if (strncasecmp(host, "www.", 4) == 0)
+        host += 4;
+    size_t length = strlen(host);
+    while (length && host[length - 1] == '/')
+        length--;
+    static const char* const forms[] = {
+        "raw.githubusercontent.com/HerXayah/brewstore-repo/main/packages.json",
+        "raw.githubusercontent.com/HerXayah/brewstore-repo/master/packages.json",
+        "raw.githubusercontent.com/HerXayah/brewstore-repo/refs/heads/main/packages.json",
+        "github.com/HerXayah/brewstore-repo/raw/main/packages.json",
+        "github.com/HerXayah/brewstore-repo/raw/master/packages.json",
+    };
+    for (size_t i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+        if (strlen(forms[i]) == length && strncasecmp(host, forms[i], length) == 0)
+            return true;
+    }
+    return false;
+}
+
 static void migrate_default_repository(void) {
     int new_index = -1;
     for (int i = 0; i < g_repos.count; i++)
@@ -3342,7 +3367,7 @@ static void migrate_default_repository(void) {
         }
     bool changed = false;
     for (int i = 0; i < g_repos.count; ) {
-        if (strcmp(g_repos.urls[i], LEGACY_DEFAULT_REPO_URL) != 0) {
+        if (!is_legacy_default_repository(g_repos.urls[i])) {
             i++;
             continue;
         }
