@@ -1,10 +1,13 @@
 # brewstore
 
-A simple **homebrew** shop for Switch 2.
+A simple **homebrew** shop for Switch 2 presented by your favourite cancer operating on jealousy and other negative stuff~
 
 Currently uses a fork of [hbmenu](https://github.com/ouncebrew/ounce-hbmenu/pull/1) because certain person is a clown.  
 
 <img width="560" height="176" alt="image" src="https://github.com/user-attachments/assets/d3fc7d20-8a16-4c2e-9d96-a69c54f56c23" />
+<img width="442" height="221" alt="image" src="https://github.com/user-attachments/assets/bf1da930-a569-4ad7-a71c-472d25b65957" />
+<img width="522" height="177" alt="image" src="https://github.com/user-attachments/assets/9f6c41a0-0791-45c2-a7c1-2b8157feaece" />
+
 
 ## Disclaimer
 
